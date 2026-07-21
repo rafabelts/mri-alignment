@@ -7,8 +7,17 @@ import voxelmorph as vxm
 
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
+def build_model(model_name, device):
 
-def build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
+    if model_name == 'voxelmorph':
+        return _build_voxelmorph(device)
+    elif model_name == 'transmorph':
+        return _build_transmorph(device)
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
+
+def _build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
                       int_downsize=VXM_INT_DOWNSIZE, src_feats=VXM_SRC_FEATS,
                       trg_feats=VXM_TRG_FEATS, nb_unet_features=None):
     """
@@ -24,6 +33,8 @@ def build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
     ).to(device)
     return model
 
+def _build_transmorph(device):
+    raise NotImplementedError("no implementation yet")
 
 def load_weights_any_shape(model, state_dict_path, device):
     """

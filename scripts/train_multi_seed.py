@@ -21,7 +21,7 @@ import config
 from src.utils import get_device, set_seed
 from src.preprocessing import preprocess_dataset
 from src.dataset import split_patients, MRICineDataset, build_lookup
-from src.models import build_voxelmorph
+from src.models import build_model 
 from src.train import train_model
 from src.evaluate import inference_with_reconstruction, EvaluationMetric
 
@@ -53,8 +53,8 @@ def main(seeds):
         print(f"\n{'='*60}\n Seed {seed}\n{'='*60}")
         set_seed(seed)
 
-        model = build_voxelmorph(device)
-        checkpoint_name = f"best_voxelmorph_seed{seed}.pt"
+        model = build_model(args.model, device)
+        checkpoint_name = f"best_{args.model}_seed{seed}.pt"
         history, checkpoint_path = train_model(model, train_loader, val_loader, device, checkpoint_name=checkpoint_name)
         
         print(f"\n Best checkpoint saved in: {checkpoint_path}")
@@ -69,7 +69,7 @@ def main(seeds):
             ax.set_xlabel("epoch")
             ax.legend()
         plt.tight_layout()
-        fig_path = config.OUTPUTS_DIR / f"training_curves_seed{seed}.png"
+        fig_path = config.OUTPUTS_DIR / f"training_curves_{args.model}_seed{seed}.png"
         plt.savefig(fig_path, dpi=150)
         plt.close(fig)
         print(f"Curves saved in: {fig_path}")
@@ -90,13 +90,16 @@ def main(seeds):
         per_run["dice"].append(np.nanmean(dice_list))
         per_run["tre"].append(np.nanmean(tre_list))
     
-    print(f"\n{'='*60} \n Summary between {len(seeds)} independent runs (seeds: {seeds})\n{'='*60}")
+    print(f"\n{'='*60} \n Summary for {args.model} between {len(seeds)} independent runs (seeds: {seeds})\n{'='*60}")
     
     for metric_name, values in per_run.items():
         print(f"{metric_name}: {np.mean(values):.4f} ± {np.std(values):.4f} (values: {[round(v, 4) for v in values]})")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--model", type=str, choices=['voxelmorph', 'transmorph'], default='voxelmorph', help='Architecture to train') 
+
     parser.add_argument("--master-seed", type=int, default=0, help="Master seed: generates N seeds") 
     parser.add_argument("--n-runs", type=int, default=5, help="Number of independent runs")
     args = parser.parse_args()
