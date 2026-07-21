@@ -1,5 +1,6 @@
 """Small utilities shared between modules"""
-
+import random
+import numpy as np
 import torch
 
 
