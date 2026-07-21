@@ -1,12 +1,5 @@
 """
-Función de pérdida supervisada: Charbonnier-EPE (robusta) contra el DVF
-real + regularización de suavidad 2D.
-
-Nota histórica (ver reporte semanal): originalmente incluía un término de
-similitud de imagen (LNCC) que se retiró tras causar divergencia de
-entrenamiento en regiones de fondo con varianza casi cero, además de
-contribuir de forma marginal al gradiente por un desajuste de escala con
-el término EPE.
+Supervised Loss Function: Charbonnier-EPE against the real DVF + 2D smooth regularization.
 """
 
 import torch
@@ -25,7 +18,7 @@ class Loss:
         self.eps = eps
 
     def charbonnier_epe_loss(self):
-        """Charbonnier: L2 para errores pequeños, L1 para errores grandes."""
+        """Charbonnier: L2 for small mistakes, L1 big errors."""
         diff_sq = ((self.pred_dvf - self.gt_dvf) ** 2).sum(dim=1)
         charbonnier = torch.sqrt(diff_sq + self.eps ** 2)
 
@@ -35,7 +28,7 @@ class Loss:
         return charbonnier.mean()
 
     def smoothness_loss(self, penalty="l2"):
-        """Regularización de difusión 2D: penaliza gradientes espaciales abruptos."""
+        """2D smoothness regularization: penalizes abrupt spatial gradients."""
         dy = torch.abs(self.pred_dvf[:, :, 1:, :] - self.pred_dvf[:, :, :-1, :])
         dx = torch.abs(self.pred_dvf[:, :, :, 1:] - self.pred_dvf[:, :, :, :-1])
 

@@ -1,8 +1,5 @@
 """
-Loop de entrenamiento reutilizable (sirve tanto para VoxelMorph como para
-cualquier modelo futuro que siga la misma interfaz `model(fixed, moving,
-registration=True) -> (moved, pred_dvf)`), y benchmark de costo
-computacional (tiempo de inferencia, memoria, número de parámetros).
+Training loop, and computational cost benchmark
 """
 
 import time
@@ -25,21 +22,13 @@ def train_model(model, train_loader, val_loader, device,
                  scheduler_factor=SCHEDULER_FACTOR, scheduler_patience=SCHEDULER_PATIENCE,
                  grad_clip_max_norm=GRAD_CLIP_MAX_NORM):
     """
-    Entrena `model` con supervisión directa (EPE + smoothness) contra el
-    DVF real, con early stopping y reducción de LR en plateau.
-
-    IMPORTANTE (ver reporte semanal — hallazgo del bug de dirección del
-    DVF): el modelo se llama como `model(img_fixed, img_moving,
-    registration=True)`, NO al revés. El ground-truth DVF satisface
-    moving(p) = fixed(p + DVF(p)); para que `pred_dvf` sea comparable
-    directamente contra `gt_dvf`, el `source` del modelo debe ser fixed y
-    el `target` moving (ver docstring de src/models.py y la sección de
-    hallazgos del reporte).
+    Trains 'model' with direct supervision (EPE + smoothness) against the
+    real DVF, with early stopping and LR reduction in plateau.
 
     Returns
     -------
-    history : dict con las curvas de train/val por época
-    checkpoint_path : Path al mejor checkpoint guardado
+    history: dict with train/val curves for epoch
+    checkpoint_path: Path to the best saved checkpoint
     """
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -88,7 +77,7 @@ def train_model(model, train_loader, val_loader, device,
 
 
 def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None, grad_clip_max_norm=None):
-    """Corre una época de train (si optimizer no es None) o de validación."""
+    """Runs a train or validation (if optimizer is None) epoch"""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -105,7 +94,7 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None,
             if is_train:
                 optimizer.zero_grad()
 
-            # source=fixed, target=moving (ver docstring de train_model)
+            # source=fixed, target=moving
             moved, pred_dvf = model(img_fixed, img_moving, registration=True)
 
             loss_fn = Loss(pred_dvf, gt_dvf, mask, lambda_dvf=lambda_dvf, lambda_smooth=lambda_smooth)
@@ -113,7 +102,7 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None,
 
             if is_train:
                 if torch.isnan(loss):
-                    print("  NaN loss, descartando batch")
+                    print("  NaN loss, discarding batch")
                     continue
                 loss.backward()
                 if grad_clip_max_norm is not None:
@@ -130,10 +119,9 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None,
 
 def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=10, n_runs=50):
     """
-    Mide tiempo de inferencia, número de parámetros, y memoria GPU pico de
-    un modelo ya entrenado. `sample_fixed`/`sample_moving` deben ser
-    tensores (1, 1, H, W) ya en el dispositivo correcto (batch_size=1,
-    para reflejar el procesamiento frame-por-frame en tiempo real).
+    Measures the inference time, parameters number, and GPU memory peak of
+    a trained model. `sample_fixed`/`sample_moving` must be tensors (1, 1, H, W)
+    in the right device (batch_size=1 to reflect a frame-per-frame processing)
     """
     model.eval()
 

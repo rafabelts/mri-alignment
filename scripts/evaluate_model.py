@@ -21,7 +21,7 @@ from src.preprocessing import preprocess_dataset
 from src.dataset import split_patients, MRICineDataset, build_lookup
 from src.models import build_voxelmorph
 from src.evaluate import inference_with_reconstruction, EvaluationMetric
-
+from src.train import benchmark_model
 
 def main(checkpoint_name):
     device = get_device()
@@ -50,6 +50,11 @@ def main(checkpoint_name):
     eval_metrics.evaluate_reconstructed()
     eval_metrics.evaluate_segmentation(ram_meta_te)
 
+    print("\n--- Computational cost (batch_size=1) ---")
+    sample_fixed, sample_moving, _, _ = next(iter(test_loader))
+    sample_fixed = sample_fixed[:1].to(device).float()
+    sample_moving = sample_moving[:1].to(device).float()
+    benchmark_model(model, sample_fixed, sample_moving, device=device)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

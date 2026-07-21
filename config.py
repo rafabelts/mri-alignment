@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # --- Routes ---
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_DIR = Path(os.environ.get("MRI_DATA_DIR", PROJECT_ROOT / "data" / "TrackRad"))
 CHECKPOINT_DIR = Path(os.environ.get("MRI_CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints"))

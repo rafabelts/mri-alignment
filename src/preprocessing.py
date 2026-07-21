@@ -1,8 +1,6 @@
 """
-Preprocesamiento de datos: lectura de archivos .mha (imágenes, DVF,
-segmentaciones), normalización, generación de máscara de anatomía,
-padding, y extracción de patches para imágenes más grandes que el
-tamaño objetivo del modelo.
+Data preprocessing: .mha file lecture, normalization, anatomy mask generation,
+padding, and patches extraction for images bigger than model objective size. 
 """
 
 import os
@@ -17,22 +15,20 @@ from config import TARGET_SIZE, EPSILON_BG
 
 def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EPSILON_BG):
     """
-    Lee los archivos .mha de cada paciente (imagen fixed, moving, DVF, y
-    segmentación de tumor si existe) y devuelve listas de arrays de numpy
-    junto con su metadata, listos para envolver en un Dataset de PyTorch.
+    Reads the .mha files of each patient and returns numpy array lists with its
+    metadata, ready to be wrapped in a PyTorch Dataset.
 
     Parameters
     ----------
     root_dir : str o Path
-        Carpeta raíz del dataset (ej. .../TrackRad).
+        Dataset root folder (ej. .../TrackRad).
     subdirs : list[str]
-        Nombres de carpetas de pacientes a incluir (ej. ['A_001', 'A_004']).
+        Patient folder names to include (ej. ['A_001', 'A_004']).
     target_size : tuple[int, int]
-        Tamaño mínimo de imagen; se aplica padding si la imagen es menor.
+        Minimum image size; applies padding if image is smaller.
     epsilon_bg : float
-        Umbral casi-cero para distinguir fondo real de anatomía real
-        (ver justificación en el reporte: un umbral fijo/Otsu excluía
-        tejido oscuro real; el fondo sintético es exactamente cero).
+        A near-zero thresold to distinguish real background from real
+        anatomy.
 
     Returns
     -------
@@ -42,7 +38,7 @@ def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EP
 
     root_dir = str(root_dir)
     if not os.path.exists(root_dir):
-        raise FileNotFoundError(f"No se encontró la carpeta: {root_dir}")
+        raise FileNotFoundError(f"Folder not found: {root_dir}")
 
     for subdir in subdirs:
         cine_dir = os.path.join(root_dir, subdir, "SynthesizedCine")
@@ -92,7 +88,7 @@ def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EP
 
 def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf_path,
                              frame_idx, target_size, epsilon_bg):
-    """Lee y preprocesa un único par (fixed, moving, dvf) + su segmentación."""
+    """Reads and preprocesses a single pair (fixed, moving, dvf) + its segmentation"""
 
     sitk_fixed = sitk.ReadImage(fix_img_path)
     sitk_moving = sitk.ReadImage(moving_img_path)
@@ -102,7 +98,7 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
     img_moving_np = sitk.GetArrayFromImage(sitk_moving).squeeze(0).astype(np.float32)
     dvf_np = sitk.GetArrayFromImage(sitk_dvf).squeeze(0).astype(np.float32)
 
-    # segmentación de tumor (opcional, no todos los datasets la traen)
+    # tumor segmentation
     seg_dir = os.path.join(root_dir, subdir, "SynthesizedSegmentations")
     seg_fixed_path = os.path.join(seg_dir, "seg_000.mha")
     seg_moving_path = os.path.join(seg_dir, f"seg_{frame_idx}.mha")
@@ -113,12 +109,12 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
     else:
         seg_fixed_np, seg_moving_np = None, None
 
-    # máscara de anatomía: solo excluye el fondo real (~0), no tejido oscuro real
+    # anatomy mask: only excludes real background (~0), not actually dark tissues
     anatomy_mask_raw = (img_fixed_np > epsilon_bg).astype(np.uint8)
     anatomy_mask_raw = binary_closing(anatomy_mask_raw, structure=np.ones((5, 5))).astype(np.uint8)
     anatomy_mask_raw = binary_fill_holes(anatomy_mask_raw).astype(np.uint8)
 
-    # normalización z-score (ANTES de cualquier padding, para no sesgar la estadística)
+    # z-score normalization
     if img_fixed_np.max() - img_fixed_np.min() > 0:
         img_fixed_np = (img_fixed_np - np.average(img_fixed_np)) / np.std(img_fixed_np)
     if img_moving_np.max() - img_moving_np.min() > 0:
@@ -145,16 +141,16 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
 
 def extract_patches(image, patch_size=TARGET_SIZE):
     """
-    Extrae patches 2D de un array de numpy usando una rejilla con traslape,
-    distribuidos de forma pareja (linspace) para cubrir toda la imagen.
+    Extracts 2D patches from a numpy array using a linspace grid with overlap
+    to cover the entire image.
 
-    Funciona igual para imágenes en escala de grises (H, W) que para el
-    DVF (H, W, 2), detectando la dimensionalidad automáticamente.
+    It works the same way for grayscale images (H, W) as it does for DVF (H, W, 2),
+    anatomatically detecting the dimensionality.
 
     Returns
     -------
     patches : list[np.ndarray]
-    coordinates : list[tuple[int, int]]  # (y, x) de la esquina superior-izquierda
+    coordinates : list[tuple[int, int]]  # (y, x) of the top-left corner
     """
     h, w = image.shape[0], image.shape[1]
     ph, pw = patch_size

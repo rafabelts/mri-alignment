@@ -46,13 +46,10 @@ class MRICineDataset(Dataset):
     Wraps the preprocessed array lists (see src/preprocessing.py) and converts them into
     individual 256 x 256 samples, splitting the originally larger images into overlapping patches.
 
-    Note: 
-
-    Nota: `seg_fixed`/`seg_moving` se excluyen deliberadamente de la
-    metadata por-patch (patch_meta) porque su tamaño completo varía por
-    paciente y rompe el collate del DataLoader al armar un batch; siguen
-    disponibles en la metadata original (ram_meta_*) para evaluación de
-    Dice/TRE sobre la imagen completa, ver src/evaluate.py.
+    Note: 'seg_fixed' / 'seg_moving' are excluded deliberately from per-patch metadata because
+    its full size varies from patient to patient and breaks the DataLoader collate when building
+    a batch; they still available in the original metadata (ram_meta_*) for evaluation of Dice/TRE
+    in the full image
     """
 
     def __init__(self, fixed_arrays, moving_arrays, dvf_arrays, meta_list, patch_size=TARGET_SIZE):
@@ -97,5 +94,5 @@ class MRICineDataset(Dataset):
 
 
 def build_lookup(ram_meta):
-    """Mapea (seq_id, frame_idx) -> índice en la lista ram_meta original."""
+    """Maps (seq_id, frame_idx) -> original ram_meta list index"""
     return {(m["seq_id"], m["frame_idx"]): idx for idx, m in enumerate(ram_meta)}

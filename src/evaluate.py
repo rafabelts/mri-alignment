@@ -1,7 +1,6 @@
 """
-Evaluación del modelo entrenado: reconstrucción de imágenes completas a
-partir de patches (promediando zonas de traslape), y cálculo de métricas
-(EPE, % Jacobiano negativo, SSIM, Dice, TRE).
+Evaluation for trainned model: full image reconstruction from patches (averaging overlap zones),
+and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
 """
 
 import numpy as np
@@ -12,9 +11,9 @@ from skimage.metrics import structural_similarity as ssim
 
 def inference_with_reconstruction(model, loader, device="cuda"):
     """
-    Corre inferencia sobre todos los patches de `loader` y los reconstruye
-    en imágenes completas por (seq_id, frame_idx), promediando las zonas
-    donde varios patches se traslapan.
+    Runs inference over all 'loader' patches and reconstructs them into
+    complete images by (seq_id, frame_idx) averaging the areas where multiple
+    patches overlap
     """
     model.eval()
     acc = {}
@@ -67,8 +66,8 @@ def inference_with_reconstruction(model, loader, device="cuda"):
 
 
 class EvaluationMetric:
-    """Calcula EPE, % Jacobiano negativo, SSIM, Dice y TRE sobre `results`
-    (la salida de `inference_with_reconstruction`)."""
+    """Computes EPE, % Jacobian negative, SSIM, Dice and TRE over `results`
+    (ouput of `inference_with_reconstruction`)."""
 
     def __init__(self, results, ram_fixed=None, ram_moving=None, meta_lookup=None):
         self.results = results
@@ -98,7 +97,7 @@ class EvaluationMetric:
         new_y = grid_y + pred_dvf[..., 1]
         new_x = grid_x + pred_dvf[..., 0]
 
-        # warp fixed -> aproxima moving (misma convención que el GT, ver train.py)
+        # warp fixed -> approximate moving (same convention as GT)
         warped = map_coordinates(img_fixed_np, [new_y, new_x], order=1, mode="constant")
 
         data_range = img_moving_np.max() - img_moving_np.min()
@@ -133,10 +132,9 @@ class EvaluationMetric:
 
     def evaluate_segmentation(self, ram_meta):
         """
-        Propaga la segmentación de tumor de `fixed` hacia `moving` usando
-        el DVF predicho (nearest-neighbor, es una máscara binaria), y
-        calcula Dice + TRE (distancia entre centroides) contra la
-        segmentación real de `moving`.
+        Propagates the tumor segmentation of fixed to moving using the predicted
+        DVF (nearest-neighbor, is binary mask), and computes Dice + TRE (distance between
+        centroids) against the real segmentation from 'moving'.
         """
         dice_list, tre_list = [], []
 

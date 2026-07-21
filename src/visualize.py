@@ -1,7 +1,7 @@
 """
-Funciones de visualización: patches individuales por cohorte (para
-inspección de preprocesamiento), y comparación fixed/moving/warped/DVF
-sobre imágenes reconstruidas (para inspección cualitativa del modelo).
+Visualization functions: individual patches per cohort (for preprocessing inspection),
+and fixed/moving/warped/DVF comparation over reconstructed images (for qualitative inspection of
+the model).
 """
 
 import numpy as np

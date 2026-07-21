@@ -1,7 +1,5 @@
 """
-Definición/construcción de modelos de registro. Por ahora solo VoxelMorph;
-TransMorph se agregará aquí siguiendo la misma interfaz (build_transmorph)
-para que train.py no tenga que cambiar entre arquitecturas.
+Definition/Construction for register models. 
 """
 
 import src.compat  # noqa: F401  (debe importarse antes que voxelmorph)
@@ -14,13 +12,7 @@ def build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
                       int_downsize=VXM_INT_DOWNSIZE, src_feats=VXM_SRC_FEATS,
                       trg_feats=VXM_TRG_FEATS, nb_unet_features=None):
     """
-    Construye una instancia de VxmDense con integración diffeomórfica.
-
-    Nota sobre `inshape`: es fijo al tamaño de entrada usado en entrenamiento
-    (normalmente 256x256, los patches). Para inferir sobre una imagen de
-    tamaño distinto sin repatchificar, se debe construir una nueva instancia
-    con el `inshape` correspondiente y cargar los pesos entrenados excluyendo
-    los buffers de rejilla (ver load_weights_any_shape en este mismo módulo).
+    Builds a VxmDense instance with diffeomorphic integration.
     """
     model = vxm.networks.VxmDense(
         inshape=inshape,
@@ -35,13 +27,13 @@ def build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
 
 def load_weights_any_shape(model, state_dict_path, device):
     """
-    Carga pesos entrenados en una instancia de VxmDense con OTRO `inshape`
-    al que se usó en entrenamiento. Los únicos parámetros dependientes del
-    tamaño son los buffers de la rejilla del SpatialTransformer (no son
-    pesos entrenables), así que se excluyen antes de cargar.
+    Load the trainned weights into a VxmDense instace with a different 
+    'inshape' than the one used during training. The only size-dependent parameters
+    are the SpatialTransformer's grid buffers (which are not trainable weights), so
+    they are excluded before loading.
 
-    Útil para correr inferencia directa sobre imágenes completas de tamaño
-    variable (270x270, 425x425, etc.) sin pasar por patches.
+    Useful for running direct inference on full-size images of variable dimensions without
+    going through patches.
     """
     import torch
 
