@@ -1,0 +1,38 @@
+[project]
+name = "mri-alignment"
+version = "0.1.0"
+description = "Deformable alignment of 2D MR images using deep learning (VoxelMorph / TransMorph)"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+    "simpleitk>=2.3",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "scikit-image>=0.22",
+    "scikit-learn>=1.3",
+    "jupyterlab>=4.0",
+    "voxelmorph==0.2",
+    "neurite>=0.2",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu121", marker = "sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu121", marker = "sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

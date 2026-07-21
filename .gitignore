@@ -1,0 +1,24 @@
+# Entorno
+.venv/
+__pycache__/
+*.pyc
+.python-version.local
+
+# Datos y checkpoints (pesan demasiado / no van en git)
+data/
+checkpoints/*
+!checkpoints/.gitkeep
+*.pt
+*.pth
+*.mha
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Resultados generados (figuras, logs)
+outputs/
+*.log
