@@ -33,8 +33,10 @@ def _build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
     ).to(device)
     return model
 
-def _build_transmorph(device):
-    raise NotImplementedError("no implementation yet")
+def _build_transmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS, int_downsize=VXM_INT_DOWNSIZE):
+    from src.transmorph import TransMorphDiff
+    model = TransMorphDiff(inshape=inshape, int_steps=int_steps, int_downsize=int_downsize).to(device)
+    return model
 
 def load_weights_any_shape(model, state_dict_path, device):
     """

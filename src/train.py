@@ -10,7 +10,7 @@ import torch.optim as optim
 
 from config import (
     LEARNING_RATE, N_EPOCHS, PATIENCE, SCHEDULER_FACTOR, SCHEDULER_PATIENCE,
-    GRAD_CLIP_MAX_NORM, LAMBDA_DVF, LAMBDA_SMOOTH, CHECKPOINT_DIR,
+    GRAD_CLIP_MAX_NORM, LAMBDA_DVF, LAMBDA_SMOOTH, CHECKPOINT_DIR, LAMBDA_KL,
 )
 from src.losses import Loss
 
@@ -18,7 +18,7 @@ from src.losses import Loss
 def train_model(model, train_loader, val_loader, device,
                  checkpoint_name="best_model.pt",
                  n_epochs=N_EPOCHS, lr=LEARNING_RATE, patience=PATIENCE,
-                 lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH,
+                 lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH, lambda_kl=LAMBDA_KL,
                  scheduler_factor=SCHEDULER_FACTOR, scheduler_patience=SCHEDULER_PATIENCE,
                  grad_clip_max_norm=GRAD_CLIP_MAX_NORM):
     """
@@ -45,9 +45,10 @@ def train_model(model, train_loader, val_loader, device,
     }
 
     for epoch in range(n_epochs):
-        train_metrics = _run_epoch(model, train_loader, device, lambda_dvf, lambda_smooth,
+        train_metrics = _run_epoch(model, train_loader, device, lambda_dvf, lambda_smooth, lambda_kl,
                                     optimizer=optimizer, grad_clip_max_norm=grad_clip_max_norm)
-        val_metrics = _run_epoch(model, val_loader, device, lambda_dvf, lambda_smooth, optimizer=None)
+
+        val_metrics = _run_epoch(model, val_loader, device, lambda_dvf, lambda_smooth, lambda_kl, optimizer=None)
 
         scheduler.step(val_metrics["loss"])
 
@@ -76,7 +77,7 @@ def train_model(model, train_loader, val_loader, device,
     return history, checkpoint_path
 
 
-def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None, grad_clip_max_norm=None):
+def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, lambda_kl, optimizer=None, grad_clip_max_norm=None):
     """Runs a train or validation (if optimizer is None) epoch"""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
@@ -99,6 +100,12 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None,
 
             loss_fn = Loss(pred_dvf, gt_dvf, mask, lambda_dvf=lambda_dvf, lambda_smooth=lambda_smooth)
             loss, parts = loss_fn.total_loss()
+
+            kl = getattr(model, "last_kl_loss", None)
+
+            if kl is not None:
+                loss = loss + lambda_kl * kl
+                parts['kl'] = kl.item()
 
             if is_train:
                 if torch.isnan(loss):

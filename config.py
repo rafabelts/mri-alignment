@@ -45,5 +45,7 @@ LAMBDA_DVF = 1.0
 LAMBDA_SMOOTH = 0.1
 CHARBONNIER_EPS = 1e-3
 
+LAMBDA_KL = 0.001
+
 # --- Device ---
 DEVICE = "cuda"  # it resolves automatially to cpu if theres no GPU (see src/utils.py)
