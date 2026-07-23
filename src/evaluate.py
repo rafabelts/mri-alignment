@@ -6,7 +6,7 @@ and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
 import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
-from skimage.metrics import structural_similarity as ssim, import hausdorff_distance
+from skimage.metrics import structural_similarity as ssim, hausdorff_distance
 
 def inference_with_reconstruction(model, loader, device="cuda"):
     """

@@ -28,7 +28,7 @@ def main():
 
     train_dirs, val_dirs, test_dirs = split_patients(config.DATA_DIR)
 
-    print("\Preprocessing train...")
+    print("\nPreprocessing train...")
     ram_fixed_tr, ram_moving_tr, ram_dvf_tr, ram_meta_tr = preprocess_dataset(config.DATA_DIR, train_dirs)
     print("Preprocessing val...")
     ram_fixed_val, ram_moving_val, ram_dvf_val, ram_meta_val = preprocess_dataset(config.DATA_DIR, val_dirs)
