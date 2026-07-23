@@ -6,8 +6,7 @@ and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
 import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
-from skimage.metrics import structural_similarity as ssim
-
+from skimage.metrics import structural_similarity as ssim, import hausdorff_distance
 
 def inference_with_reconstruction(model, loader, device="cuda"):
     """
@@ -136,7 +135,7 @@ class EvaluationMetric:
         DVF (nearest-neighbor, is binary mask), and computes Dice + TRE (distance between
         centroids) against the real segmentation from 'moving'.
         """
-        dice_list, tre_list = [], []
+        dice_list, tre_list, hd_list = [], [], []
 
         for key, r in self.results.items():
             idx = self.meta_lookup.get(key)
@@ -161,15 +160,21 @@ class EvaluationMetric:
             denom = (warped_seg > 0).sum() + (seg_moving > 0).sum()
             dice_list.append(2 * intersection / (denom + 1e-8) if denom > 0 else np.nan)
 
+            # Hausdorff Distance
+            if (warped_seg > 0).any() and (seg_moving > 0).any():
+                hd = hausdorff_distance(warped_seg > 0, seg_moving > 0)
+                hd_list.append(hd)
+
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
             if c_pred is not None and c_real is not None:
                 tre_list.append(np.linalg.norm(c_pred - c_real))
 
         print(f"Dice: {np.nanmean(dice_list):.4f} ± {np.nanstd(dice_list):.4f}")
+        print(f"Hausdorff Distance: {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
         print(f"TRE: {np.nanmean(tre_list):.4f} ± {np.nanstd(tre_list):.4f}")
 
-        return dice_list, tre_list
+        return dice_list, tre_list, hd_list
 
     @staticmethod
     def _centroid(mask):

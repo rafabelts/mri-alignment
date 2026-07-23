@@ -47,7 +47,7 @@ def main(seeds):
 
     meta_lookup_te = build_lookup(ram_meta_te)
     
-    per_run = {"epe": [], "jacobian": [], "ssim": [], "dice": [], "tre": []}
+    per_run = {"epe": [], "jacobian": [], "ssim": [], "dice": [], "tre": [], "hausdorff": []}
 
     for seed in seeds:
         print(f"\n{'='*60}\n Seed {seed}\n{'='*60}")
@@ -82,13 +82,14 @@ def main(seeds):
         test_results = inference_with_reconstruction(model, test_loader, device=device)
         eval_metrics = EvaluationMetric(test_results, ram_fixed_te, ram_moving_te, meta_lookup_te)
         epe_list, jac_list, ssim_list = eval_metrics.evaluate_reconstructed()
-        dice_list, tre_list = eval_metrics.evaluate_segmentation(ram_meta_te)
+        dice_list, tre_list, hd_list = eval_metrics.evaluate_segmentation(ram_meta_te)
 
         per_run["epe"].append(np.mean(epe_list))
         per_run["jacobian"].append(np.mean(jac_list))
         per_run["ssim"].append(np.mean(ssim_list))
         per_run["dice"].append(np.nanmean(dice_list))
         per_run["tre"].append(np.nanmean(tre_list))
+        per_run["hausdorff"].append(np.nanmean(hd_list))
     
     print(f"\n{'='*60} \n Summary for {args.model} between {len(seeds)} independent runs (seeds: {seeds})\n{'='*60}")
     
