@@ -8,7 +8,6 @@ import voxelmorph as vxm
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
 def build_model(model_name, device):
-
     if model_name == 'voxelmorph':
         return _build_voxelmorph(device)
     elif model_name == 'transmorph':

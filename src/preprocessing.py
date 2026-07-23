@@ -160,6 +160,8 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
         "mean_moving": mean_moving, "std_moving": std_moving
     }
 
+    spatial_meta = {"spacing": spacing, "origin": origin, "direction": direction}
+
     return (img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta,
             anatomy_mask_raw, norm_stats, spatial_meta)
 
