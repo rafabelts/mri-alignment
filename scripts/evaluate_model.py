@@ -19,11 +19,11 @@ import config
 from src.utils import get_device
 from src.preprocessing import preprocess_dataset
 from src.dataset import split_patients, MRICineDataset, build_lookup
-from src.models import build_voxelmorph
+from src.models import build_model
 from src.evaluate import inference_with_reconstruction, EvaluationMetric
 from src.train import benchmark_model
 
-def main(checkpoint_name):
+def main(model_name, checkpoint_name):
     device = get_device()
     print(f"Using device: {device}")
 
@@ -37,7 +37,7 @@ def main(checkpoint_name):
     test_dataset = MRICineDataset(ram_fixed_te, ram_moving_te, ram_dvf_te, ram_meta_te)
     test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False)
 
-    model = build_voxelmorph(device)
+    model = build_model(model_name, device)
     checkpoint_path = config.CHECKPOINT_DIR / checkpoint_name
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
@@ -58,6 +58,7 @@ def main(checkpoint_name):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, choices=['voxelmorph', 'transmorph'], default='voxelmorph', help='Architecture to evaluate')
     parser.add_argument("--checkpoint", type=str, default="best_voxelmorph.pt")
     args = parser.parse_args()
-    main(args.checkpoint)
+    main(args.model, args.checkpoint)
