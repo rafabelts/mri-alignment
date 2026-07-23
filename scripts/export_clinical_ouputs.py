@@ -40,7 +40,7 @@ def main(model_name, n_samples, checkpoint_name):
     print("Preprocessing test set...")
     ram_fixed_te, ram_moving_te, ram_dvf_te, ram_meta_te = preprocess_dataset(config.DATA_DIR, test_dirs)
 
-    checkpoint_name = checkpoint_name or f"best_{model_name}.pt"
+    checkpoint_name = checkpoint_name or f"best_{model_name}_seed8506.pt"
     checkpoint_path = config.CHECKPOINT_DIR / checkpoint_name
     print(f"Checkpoint: {checkpoint_path}")
 
