@@ -2,16 +2,16 @@
 Definition/Construction for register models. 
 """
 
-import src.compat  # noqa: F401  (debe importarse antes que voxelmorph)
+import src.compat
 import voxelmorph as vxm
 
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
-def build_model(model_name, device):
+def build_model(model_name, device, inshape=None):
     if model_name == 'voxelmorph':
-        return _build_voxelmorph(device)
+        return _build_voxelmorph(device, inshape=inshape) if inshape else _build_voxelmorph(device)
     elif model_name == 'transmorph':
-        return _build_transmorph(device)
+        return _build_transmorph(device, inshape=inshape) if inshape else _build_transmorph(device)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 

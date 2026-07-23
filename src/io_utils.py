@@ -1,67 +1,85 @@
 import numpy as np
 import SimpleITK as sitk
 import torch
+from scipy.ndimage import map_coordinates
+from src.models import build_model, load_weights_any_shape
 
 def denormalize(array_normalized, mean, std):
     """Reverts z-score normalization: x = x_norm * std + mean."""
     array_normalized * std + mean
 
-def save_as_mha(array, spatial_meta, output_path):
-    """
-    Saves 2D numpy array as .mha, preserving spacing/origin/direction from the correspondant original
-    file.
+def padded_shape(h, w, multiple=16):
+    # calculates the nearest larger size (h, w) that is a multiple of multiple param
+    pad_h = (multiple - h % multiple) % multiple
+    pad_w = (multiple - w % multiple) % multiple
+    return h + pad_h, w + pad_w
 
-    Parameters
-    ----------
-    array : np.ndarray (H, W) — in original intesity units
-    spatial_meta : dict with 'spacing', 'origin', 'direction'
-    output_path: str or Path
-    """
+def pad_to_multiple(array, multiple=16):
+    # fills w zero until the closest multiple of 16
+    h, w = array.shape[:2]
+    ph, pw = padded_shape(h, w, multiple)
+    pad_spec = ((0, ph - h), (0, pw - w)) if array.ndim == 2 else ((0, ph - h), (0, pw - w), (0, 0))
+    return np.pad(array, pad_spec, mode="constant")
 
-    array = array.astype(np.float32)
-    sitk_array = array[np.newaxis, ...]
+def crop_to_original(array, original_shape):
+    # crop it back to its original size, discarding the added padding
+    h, w = original_shape
+    return array[:h, :w, ...] if array.ndim > 2 else array[:h, :w]
 
-    img = sitk.GetImageFromArray(sitk_array, isVector=(array.ndim == 3))
-    img.SetSpacing(spatial_meta["spacing"])
-    img.SetOrigin(spatial_meta["origin"])
-    img.SetDirection(spatial_meta["direction"])
-    sitk.WriteImage(img, str(output_path))
-
-def run_inference_and_export(model, img_fixed_np, img_moving_np, norm_stats, spatial_meta,
+def infer_on_external_images(model_name, checkpoint_path, fixed_path, moving_path,
                               output_dir, prefix, device="cuda"):
     """
-    Corre inferencia completa sobre un par ya preprocesado (normalizado,
-    tamaño completo) y exporta fixed, warped, y el DVF predicho como .mha
-    clínicamente utilizables.
-
-    Parameters
-    ----------
-    output_dir : Path — carpeta donde se guardan los 3 archivos
-    prefix : str — identifica el caso (ej. "A_020_003")
-
-    Returns
-    -------
-    fixed_clinical, warped_clinical : np.ndarray, intensidades desnormalizadas
-    pred_dvf_np : np.ndarray (H, W, 2), NUNCA se normaliza (se guarda tal cual)
+        Runs inference over 2 images, normalizes, fills to multiple of 16, infers, crops and exports
+        fixed/warped/dvf as .mha
     """
+    sitk_fixed = sitk.ReadImage(str(fixed_path))
+    sitk_moving = sitk.ReadImage(str(moving_path))
+
+    spatial_meta = {
+        "spacing": sitk_fixed.GetSpacing(),
+        "origin": sitk_fixed.GetOrigin(),
+        "direction": sitk_fixed.GetDirection(),
+    }
+
+    img_fixed_raw = sitk.GetArrayFromImage(sitk_fixed).squeeze(0).astype(np.float32)
+    img_moving_raw = sitk.GetArrayFromImage(sitk_moving).squeeze(0).astype(np.float32)
+    original_shape = img_fixed_raw.shape
+
+    mean_fixed, std_fixed = float(img_fixed_raw.mean()), float(img_fixed_raw.std())
+    img_fixed_norm = (img_fixed_raw - mean_fixed) / std_fixed if std_fixed > 0 else img_fixed_raw
+    img_moving_norm = (img_moving_raw - img_moving_raw.mean()) / img_moving_raw.std()
+
+    fixed_padded = pad_to_multiple(img_fixed_norm, multiple=16)
+    moving_padded = pad_to_multiple(img_moving_norm, multiple=16)
+
+    ph, pw = fixed_padded.shape
+
+    model = build_model(model_name, device, inshape=(ph, pw))
+    model = load_weights_any_shape(model, checkpoint_path, device)
+
     model.eval()
 
-    fixed_t = torch.from_numpy(img_fixed_np).unsqueeze(0).unsqueeze(0).to(device).float()
-    moving_t = torch.from_numpy(img_moving_np).unsqueeze(0).unsqueeze(0).to(device).float()
-
+    fixed_t = torch.from_numpy(fixed_padded).unsqueeze(0).unsqueeze(0).to(device).float()
+    moving_t = torch.from_numpy(moving_padded).unsqueeze(0).unsqueeze(0).to(device).float()
+    
     with torch.no_grad():
         moved, pred_dvf = model(fixed_t, moving_t, registration=True)
 
-    pred_dvf_np = pred_dvf.squeeze(0).permute(1, 2, 0).cpu().numpy()  # (H, W, 2)
+    # computational cost
+    print(f"--- Computational cost over image size ({ph} x {pw}) ---")
+    benchmark_model(model, fixed_t, moving_t, device=device)
 
-    h, w = img_fixed_np.shape
+    pred_dvf_np = pred_dvf.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    pred_dvf_np = crop_to_original(pred_dvf_np, original_shape)
+
+    h, w = original_shape
     grid_y, grid_x = np.mgrid[0:h, 0:w]
     new_y = grid_y + pred_dvf_np[..., 1]
     new_x = grid_x + pred_dvf_np[..., 0]
-    warped_normalized = map_coordinates(img_fixed_np, [new_y, new_x], order=1, mode="constant")
+    warped_normalized = map_coordinates(img_fixed_norm, [new_y, new_x], order=1, mode="constant")
 
-    fixed_clinical = denormalize(img_fixed_np, norm_stats["mean_fixed"], norm_stats["std_fixed"])
-    warped_clinical = denormalize(warped_normalized, norm_stats["mean_fixed"], norm_stats["std_fixed"])
+    fixed_clinical = img_fixed_raw
+    warped_clinical = denormalize(warped_normalized, mean_fixed, std_fixed)
 
     save_as_mha(fixed_clinical, spatial_meta, output_dir / f"fixed_{prefix}.mha")
     save_as_mha(warped_clinical, spatial_meta, output_dir / f"warped_{prefix}.mha")
