@@ -1,6 +1,6 @@
 import numpy as np
 import SimpleITK as sitk
-
+import torch
 
 def denormalize(array_normalized, mean, std):
     """Reverts z-score normalization: x = x_norm * std + mean."""
