@@ -64,9 +64,9 @@ def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EP
             if not os.path.exists(dvf_path):
                 continue
 
-            img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta, anatomy_mask_raw = (
-                _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path,
-                                         dvf_path, frame_idx, target_size, epsilon_bg)
+            (img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta,
+                anatomy_mask_raw, norm_stats, spatial_meta) = _read_and_process_frame(
+                root_dir, subdir, fix_img_path, moving_img_path, dvf_path, frame_idx, target_size, epsilon_bg
             )
 
             fixed_list.append(img_fixed_np)
@@ -81,6 +81,8 @@ def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EP
                 "anatomy_mask": anatomy_mask_raw,
                 "seg_fixed": seg_fixed_np,
                 "seg_moving": seg_moving_np,
+                "norm_stats": norm_stats,
+                "spatial_meta": spatial_meta,
             })
 
     return fixed_list, moving_list, dvf_list, metadata_list
@@ -93,6 +95,11 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
     sitk_fixed = sitk.ReadImage(fix_img_path)
     sitk_moving = sitk.ReadImage(moving_img_path)
     sitk_dvf = sitk.ReadImage(dvf_path)
+
+    # Sitk metadata
+    spacing = sitk_fixed.GetSpacing()
+    origin = sitk_fixed.GetOrigin()
+    direction = sitk_fixed.GetDirection()
 
     img_fixed_np = sitk.GetArrayFromImage(sitk_fixed).squeeze(0).astype(np.float32)
     img_moving_np = sitk.GetArrayFromImage(sitk_moving).squeeze(0).astype(np.float32)
@@ -114,11 +121,23 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
     anatomy_mask_raw = binary_closing(anatomy_mask_raw, structure=np.ones((5, 5))).astype(np.uint8)
     anatomy_mask_raw = binary_fill_holes(anatomy_mask_raw).astype(np.uint8)
 
+    # anatomy mask: only excludes real background (~0), not actually dark tissues
+    anatomy_mask_raw = (img_fixed_np > epsilon_bg).astype(np.uint8)
+    anatomy_mask_raw = binary_closing(anatomy_mask_raw, structure=np.ones((5, 5))).astype(np.uint8)
+    anatomy_mask_raw = binary_fill_holes(anatomy_mask_raw).astype(np.uint8)
+
+    # normalization stats before applying it
+    mean_fixed = float(np.average(img_fixed_np))
+    std_fixed = float(np.std(img_fixed_np))
+
+    mean_moving = float(np.average(img_moving_np))
+    std_moving = float(np.std(img_moving_np))
+
     # z-score normalization
     if img_fixed_np.max() - img_fixed_np.min() > 0:
-        img_fixed_np = (img_fixed_np - np.average(img_fixed_np)) / np.std(img_fixed_np)
+        img_fixed_np = (img_fixed_np - mean_fixed) / std_fixed
     if img_moving_np.max() - img_moving_np.min() > 0:
-        img_moving_np = (img_moving_np - np.average(img_moving_np)) / np.std(img_moving_np)
+        img_moving_np = (img_moving_np - mean_moving) / std_moving
 
     h, w = img_fixed_np.shape
     pad_meta = {"top": 0, "bottom": 0, "left": 0, "right": 0, "padded": False}
@@ -135,8 +154,14 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
         anatomy_mask_raw = np.pad(anatomy_mask_raw, ((top, bottom), (left, right)), mode="constant")
 
         pad_meta = {"top": top, "bottom": bottom, "left": left, "right": right, "padded": True}
+    
+    norm_stats = {
+        "mean_fixed": mean_fixed, "std_fixed": std_fixed,
+        "mean_moving": mean_moving, "std_moving": std_moving
+    }
 
-    return img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta, anatomy_mask_raw
+    return (img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta,
+            anatomy_mask_raw, norm_stats, spatial_meta)
 
 
 def extract_patches(image, patch_size=TARGET_SIZE):
