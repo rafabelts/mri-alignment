@@ -28,22 +28,24 @@ def save_as_mha(array, spatial_meta, output_path):
     sitk.WriteImage(img, str(output_path))
 
 def run_inference_and_export(model, img_fixed_np, img_moving_np, norm_stats, spatial_meta,
-                             output_path, device="cuda"):
+                              output_dir, prefix, device="cuda"):
     """
-    Runs full inference over a processed image and exports fixed, warped and predicted dvf as .mha
-    
-    Parameters:
-    -----------
-    output_dir: Path - file where the files are stored
-    prefix: str - identifies the case (e.g. "C_002")
+    Corre inferencia completa sobre un par ya preprocesado (normalizado,
+    tamaño completo) y exporta fixed, warped, y el DVF predicho como .mha
+    clínicamente utilizables.
 
-    Returns:
-    --------
-    fixed_clinical, warped_clinical : np.ndarray
-    pred_dvf_np : np.ndarray (H, W, 2)
+    Parameters
+    ----------
+    output_dir : Path — carpeta donde se guardan los 3 archivos
+    prefix : str — identifica el caso (ej. "A_020_003")
+
+    Returns
+    -------
+    fixed_clinical, warped_clinical : np.ndarray, intensidades desnormalizadas
+    pred_dvf_np : np.ndarray (H, W, 2), NUNCA se normaliza (se guarda tal cual)
     """
-
     model.eval()
+
     fixed_t = torch.from_numpy(img_fixed_np).unsqueeze(0).unsqueeze(0).to(device).float()
     moving_t = torch.from_numpy(img_moving_np).unsqueeze(0).unsqueeze(0).to(device).float()
 
@@ -51,7 +53,7 @@ def run_inference_and_export(model, img_fixed_np, img_moving_np, norm_stats, spa
         moved, pred_dvf = model(fixed_t, moving_t, registration=True)
 
     pred_dvf_np = pred_dvf.squeeze(0).permute(1, 2, 0).cpu().numpy()  # (H, W, 2)
-   
+
     h, w = img_fixed_np.shape
     grid_y, grid_x = np.mgrid[0:h, 0:w]
     new_y = grid_y + pred_dvf_np[..., 1]
