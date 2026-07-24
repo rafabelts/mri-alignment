@@ -114,8 +114,9 @@ class EvaluationMetric:
 
             diff = pred_dvf - gt_dvf
             epe_map = np.sqrt((diff ** 2).sum(axis=-1))
+            epe_val = epe_map[mask].mean() if mask.sum() > 0 else np.nan
             if mask.sum() > 0:
-                epe_list.append(epe_map[mask].mean())
+                epe_list.append(epe_val)
 
             jac = self.jacobian_determinant(pred_dvf)
             jac_val = (jac < 0).sum() / jac.size * 100
