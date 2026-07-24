@@ -66,7 +66,7 @@ def main(model_name, seeds):
             ax.set_title(name)
             ax.set_xticks([])
         plt.tight_layout()
-        boxplot_path = config.OUTPUT_DIR / f"boxplots_{model_name}_seed{seed}.png"
+        boxplot_path = config.OUTPUTS_DIR / f"boxplots_{model_name}_seed{seed}.png"
         plt.savefig(boxplot_path, dpi=150)
         plt.close(fig)
         print(f"Boxplots saved in: {boxplot_path}")
