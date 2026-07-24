@@ -15,6 +15,7 @@ dependencies = [
     "jupyterlab>=4.0",
     "voxelmorph==0.2",
     "neurite>=0.2",
+    "pandas>=3.0.5",
 ]
 
 [tool.uv.sources]
