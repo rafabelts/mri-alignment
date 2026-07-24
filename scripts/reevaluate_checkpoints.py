@@ -30,6 +30,13 @@ def main(model_name, seeds):
     device = get_device()
     print(f"Using: {device}")
     
+    # --- output folders ---
+    run_dir = config.OUTPUTS_DIR / f"reevaluation_{model_name}"
+    boxplots_dir = run_dir / "boxplots"
+    per_case_dir = run_dir / "per_case"
+    boxplots_dir.mkdir(parents=True, exist_ok=True)
+    per_case_dir.mkdir(parents=True, exist_ok=True)
+
     _, _, test_dirs = split_patients(config.DATA_DIR, verbose=False)
 
     print("Preprocessing dataset...")
@@ -40,7 +47,7 @@ def main(model_name, seeds):
     meta_lookup_te = build_lookup(ram_meta_te)
 
     per_run = {"epe": [], "jacobian": [], "ssim": [], "dice": [], "tre": [], "hausdorff": []}
-    rows = [] # rows for metrics csv 
+    summary_rows = [] # rows for metrics csv 
 
     for seed in seeds:
         checkpoint_path = config.CHECKPOINT_DIR / f"best_{model_name}_seed{seed}.pt"
@@ -66,28 +73,39 @@ def main(model_name, seeds):
             ax.set_title(name)
             ax.set_xticks([])
         plt.tight_layout()
-        boxplot_path = config.OUTPUTS_DIR / f"boxplots_{model_name}_seed{seed}.png"
+        boxplot_path = boxplots_dir / f"seed_{seed}.png"
         plt.savefig(boxplot_path, dpi=150)
         plt.close(fig)
         print(f"Boxplots saved in: {boxplot_path}")
 
-        np.savez(
-            config.OUTPUTS_DIR / f"per_case_metrics_{model_name}_seed{seed}.npz",
-            epe=epe_list, jacobian=jac_list, ssim=ssim_list,
-            dice=dice_list, tre=tre_list, hausdorff=hd_list,
-        )
+        # --- per case csv ---
+        per_case_rows = []
+        for key in test_results.keys():
+            seq_id, frame_idx = key
 
-        # computational cost benchmark
+            rec = eval_metrics.per_case_reconstructed.get(key, {})
+            seg = eval_metrics.per_case_segmentation.get(key, {})
+
+            per_case_rows.append({
+                "seq_id": seq_id, "frame_idx": frame_idx,
+                "epe": rec.get("epe"), "jacobian": rec.get("jacobian"), "ssim": rec.get("ssim"),
+                "dice": seg.get("dice"), "tre": seg.get("tre"), "hausdorff": seg.get("hausdorff"),
+            })
+        per_case_df = pd.DataFrame(per_case_rows)
+        per_case_path = per_case_dir / f"seed_{seed}.csv"
+        per_case_df.to_csv(per_case_path, index=False)
+        print(f"CSV per case ({len(per_case_df)} rows) saved in: {per_case_path}")
+
+        #  --- computational cost benchmark ---
         print(f"\n--- Computational cost (seed {seed}) ---")
         sample_fixed, sample_moving, _, _ = next(iter(test_loader))
         sample_fixed = sample_fixed[:1].to(device).float()
         sample_moving = sample_moving[:1].to(device).float()
         bench = benchmark_model(model, sample_fixed, sample_moving, device=device)
-        
+
         # --- summary for metrics and row for csv ---
-        row = {
-            "model": model_name,
-            "seed": seed,
+        summary_rows.append({
+            "model": model_name, "seed": seed,
             "epe_mean": np.mean(epe_list), "epe_std": np.std(epe_list),
             "jacobian_mean": np.mean(jac_list), "jacobian_std": np.std(jac_list),
             "ssim_mean": np.mean(ssim_list), "ssim_std": np.std(ssim_list),
@@ -96,11 +114,9 @@ def main(model_name, seeds):
             "hausdorff_mean": np.nanmean(hd_list), "hausdorff_std": np.nanstd(hd_list),
             "n_params": bench["n_params"],
             "inference_time_ms_mean": bench["inference_time_ms_mean"],
-            "inference_time_ms_std": bench["inference_time_ms_std"],
             "fps": bench["fps"],
             "peak_memory_mb": bench["peak_memory_mb"],
-        }
-        rows.append(row)
+        })
 
         per_run["epe"].append(np.mean(epe_list))
         per_run["jacobian"].append(np.mean(jac_list))
@@ -113,11 +129,11 @@ def main(model_name, seeds):
     for metric_name, values in per_run.items():
         print(f"{metric_name}: {np.mean(values):.4f} ± {np.std(values):.4f} (values: {[round(v, 4) for v in values]})")
 
-    df = pd.DataFrame(rows)
-    csv_path = config.OUTPUTS_DIR / f"evaluation_summary_{model_name}.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Summary saved in: {csv_path}")
-
+    # --- summary.csv -> raiz de la carpeta del modelo ---
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = run_dir / "summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    print(f"\nSummary saved in: {summary_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

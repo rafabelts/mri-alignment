@@ -1,7 +1,7 @@
 """
     Evaluation for trainned model: full image reconstruction from patches (averaging overlap zones),
     and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
-    """
+"""
 
 import numpy as np
 import torch
@@ -107,6 +107,7 @@ class EvaluationMetric:
 
     def evaluate_reconstructed(self):
         epe_list, pct_neg_jac_list, ssim_list = [], [], []
+        self.per_case_reconstructed = {}
 
         for key, r in self.results.items():
             pred_dvf, gt_dvf, mask = r["pred_dvf"], r["gt_dvf"], r["anatomy_mask"]
@@ -117,11 +118,14 @@ class EvaluationMetric:
                 epe_list.append(epe_map[mask].mean())
 
             jac = self.jacobian_determinant(pred_dvf)
-            pct_neg_jac_list.append((jac < 0).sum() / jac.size * 100)
+            jac_val = (jac < 0).sum() / jac.size * 100
+            pct_neg_jac_list.append(jac_val)
 
             ssim_val = self.compute_ssim(key, pred_dvf)
             if ssim_val is not None:
                 ssim_list.append(ssim_val)
+
+            self.per_case_reconstructed[key] = {"epe": epe_val, "jacobian": jac_val, "ssim": ssim_val}
 
         print(f"EPE average (reconstructed): {np.mean(epe_list):.4f} ± {np.std(epe_list):.4f}")
         print(f"% negative jacobian (reconstructed): {np.mean(pct_neg_jac_list):.4f} ± {np.std(pct_neg_jac_list):.4f}")
@@ -136,6 +140,7 @@ class EvaluationMetric:
         centroids) against the real segmentation from 'moving'.
         """
         dice_list, tre_list, hd_list = [], [], []
+        self.per_case_segmentation = {}
 
         for key, r in self.results.items():
             idx = self.meta_lookup.get(key)
@@ -158,17 +163,23 @@ class EvaluationMetric:
 
             intersection = ((warped_seg > 0) & (seg_moving > 0)).sum()
             denom = (warped_seg > 0).sum() + (seg_moving > 0).sum()
-            dice_list.append(2 * intersection / (denom + 1e-8) if denom > 0 else np.nan)
+            dice_val = 2 * intersection / (denom + 1e-8) if denom > 0 else np.nan
+            dice_list.append(dice_val)
 
+            hd_val = np.nan
             # Hausdorff Distance
             if (warped_seg > 0).any() and (seg_moving > 0).any():
-                hd = hausdorff_distance(warped_seg > 0, seg_moving > 0)
-                hd_list.append(hd)
+                hd_val = hausdorff_distance(warped_seg > 0, seg_moving > 0)
+                hd_list.append(hd_val)
 
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
+            tre_val = np.nan
             if c_pred is not None and c_real is not None:
-                tre_list.append(np.linalg.norm(c_pred - c_real))
+                tre_val = np.linalg.norm(c_pred - c_real)
+                tre_list.append(tre_val)
+
+            self.per_case_segmentation[key] = {"dice": dice_val, "tre": tre_val, "hausdorff": hd_val}
 
         print(f"Dice: {np.nanmean(dice_list):.4f} ± {np.nanstd(dice_list):.4f}")
         print(f"Hausdorff Distance: {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
