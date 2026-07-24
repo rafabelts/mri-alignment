@@ -1,7 +1,7 @@
 """
-Evaluation for trainned model: full image reconstruction from patches (averaging overlap zones),
-and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
-"""
+    Evaluation for trainned model: full image reconstruction from patches (averaging overlap zones),
+    and compute of metrics (EPE, % Jacobian negative, SSIM, Dice, Tre)
+    """
 
 import numpy as np
 import torch
@@ -10,10 +10,10 @@ from skimage.metrics import structural_similarity as ssim, hausdorff_distance
 
 def inference_with_reconstruction(model, loader, device="cuda"):
     """
-    Runs inference over all 'loader' patches and reconstructs them into
-    complete images by (seq_id, frame_idx) averaging the areas where multiple
-    patches overlap
-    """
+        Runs inference over all 'loader' patches and reconstructs them into
+        complete images by (seq_id, frame_idx) averaging the areas where multiple
+        patches overlap
+        """
     model.eval()
     acc = {}
 
@@ -44,24 +44,24 @@ def inference_with_reconstruction(model, loader, device="cuda"):
                         "count": np.zeros((h, w), dtype=np.float32),
                     }
 
-                ph, pw = pred_dvf_np.shape[1], pred_dvf_np.shape[2]
-                ph_eff = min(ph, h - py)
-                pw_eff = min(pw, w - px)
+                    ph, pw = pred_dvf_np.shape[1], pred_dvf_np.shape[2]
+                    ph_eff = min(ph, h - py)
+                    pw_eff = min(pw, w - px)
 
-                acc[key]["pred_sum"][py:py + ph_eff, px:px + pw_eff, :] += pred_dvf_np[i, :ph_eff, :pw_eff, :]
-                acc[key]["gt_sum"][py:py + ph_eff, px:px + pw_eff, :] += gt_dvf_np[i, :ph_eff, :pw_eff, :]
-                acc[key]["mask_sum"][py:py + ph_eff, px:px + pw_eff] += mask_np[i, :ph_eff, :pw_eff]
-                acc[key]["count"][py:py + ph_eff, px:px + pw_eff] += 1
+                    acc[key]["pred_sum"][py:py + ph_eff, px:px + pw_eff, :] += pred_dvf_np[i, :ph_eff, :pw_eff, :]
+                    acc[key]["gt_sum"][py:py + ph_eff, px:px + pw_eff, :] += gt_dvf_np[i, :ph_eff, :pw_eff, :]
+                    acc[key]["mask_sum"][py:py + ph_eff, px:px + pw_eff] += mask_np[i, :ph_eff, :pw_eff]
+                    acc[key]["count"][py:py + ph_eff, px:px + pw_eff] += 1
 
-    results = {}
-    for key, data in acc.items():
-        count_safe = np.maximum(data["count"], 1)
-        results[key] = {
-            "pred_dvf": data["pred_sum"] / count_safe[..., None],
-            "gt_dvf": data["gt_sum"] / count_safe[..., None],
-            "anatomy_mask": (data["mask_sum"] / count_safe) > 0.5,
-        }
-    return results
+        results = {}
+        for key, data in acc.items():
+            count_safe = np.maximum(data["count"], 1)
+            results[key] = {
+                "pred_dvf": data["pred_sum"] / count_safe[..., None],
+                "gt_dvf": data["gt_sum"] / count_safe[..., None],
+                "anatomy_mask": (data["mask_sum"] / count_safe) > 0.5,
+            }
+        return results
 
 
 class EvaluationMetric:
