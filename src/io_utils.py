@@ -3,6 +3,7 @@ import SimpleITK as sitk
 import torch
 from scipy.ndimage import map_coordinates
 from src.models import build_model, load_weights_any_shape
+from src.train import benchmark_model
 
 def denormalize(array_normalized, mean, std):
     """Reverts z-score normalization: x = x_norm * std + mean."""

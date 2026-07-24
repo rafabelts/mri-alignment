@@ -3,7 +3,7 @@ Reevaluate already-trained checkpoints with updated metrics (e.g. after
 adding a new metric to EvaluationMetric).
 
 Usage:
-    uv run python scripts/reevaluate_checkpoints.py --model voxelmorph --seeds 2697 3078 5111 6369 8506
+    uv run python scripts/reevaluate_checkpoints.py --model voxelmorph --seeds 8506 6369 5111 2697 3078
 """
 
 import sys
