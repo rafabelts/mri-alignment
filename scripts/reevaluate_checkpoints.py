@@ -90,6 +90,10 @@ def main(model_name, seeds):
                 "seq_id": seq_id, "frame_idx": frame_idx,
                 "epe": rec.get("epe"), "jacobian": rec.get("jacobian"), "ssim": rec.get("ssim"),
                 "dice": seg.get("dice"), "tre": seg.get("tre"), "hausdorff": seg.get("hausdorff"),
+                "tumor_area_px": seg.get("tumor_area_px"),
+                "bounding_box_diag": seg.get("bbox_diag"),
+                "hausdorff_norm_bounding_box": seg.get("hausdorff_norm_bbox"),
+                "tre_norm_bounding_box": seg.get("tre_norm_bbox")
             })
         per_case_df = pd.DataFrame(per_case_rows)
         per_case_path = per_case_dir / f"seed_{seed}.csv"

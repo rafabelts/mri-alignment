@@ -74,7 +74,6 @@ def main(seeds):
         plt.close(fig)
         print(f"Curves saved in: {fig_path}")
 
-
         # load the best checkpoint from run before evaluating
         model.load_state_dict(torch.load(config.CHECKPOINT_DIR / checkpoint_name, map_location=device))
         model.eval()

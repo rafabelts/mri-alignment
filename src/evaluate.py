@@ -151,8 +151,18 @@ class EvaluationMetric:
             meta = ram_meta[idx]
             seg_fixed = meta.get("seg_fixed")
             seg_moving = meta.get("seg_moving")
+
             if seg_fixed is None or seg_moving is None:
                 continue
+
+            # segmentation bounding box
+            ys, xs = np.where(seg_moving > 0)
+            if len(ys) > 0:
+                bbox_h = ys.max() - ys.min() + 1
+                bbox_w = xs.max() - xs.min() + 1
+                bbox_diag = np.sqrt(bbox_h ** 2 + bbox_w ** 2)
+            else:
+                bbox_h = bbox_w = bbox_diag = np.nan
 
             pred_dvf = r["pred_dvf"]
             h, w = seg_fixed.shape
@@ -171,16 +181,22 @@ class EvaluationMetric:
             # Hausdorff Distance
             if (warped_seg > 0).any() and (seg_moving > 0).any():
                 hd_val = hausdorff_distance(warped_seg > 0, seg_moving > 0)
-                hd_list.append(hd_val)
+            hd_list.append(hd_val)
 
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
             tre_val = np.nan
             if c_pred is not None and c_real is not None:
                 tre_val = np.linalg.norm(c_pred - c_real)
-                tre_list.append(tre_val)
+            tre_list.append(tre_val)
 
-            self.per_case_segmentation[key] = {"dice": dice_val, "tre": tre_val, "hausdorff": hd_val}
+            self.per_case_segmentation[key] = {
+                "dice": dice_val, "tre": tre_val, "hausdorff": hd_val,
+                "tumor_area_px": int((seg_moving > 0).sum()),
+                "bbox_diag": bbox_diag,
+                "hausdorff_norm_bbox": hd_val / bbox_diag if bbox_diag else np.nan,
+                "tre_norm_bbox": tre_val / bbox_diag if bbox_diag else np.nan,
+            }
 
         print(f"Dice: {np.nanmean(dice_list):.4f} ± {np.nanstd(dice_list):.4f}")
         print(f"Hausdorff Distance: {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
