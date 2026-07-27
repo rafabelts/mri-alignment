@@ -62,7 +62,7 @@ class TransMorphDiff(nn.Module):
         (which allows backpropagation trough the samples); in inference it uses the mean (deterministic).
     """
     def __init__(self, inshape=(256, 256), int_steps=7, int_downsize=2,
-                 embed_dim=96, depth=4, num_heads=4):
+                 embed_dim=96, depth=4, num_heads=4, prior_lambda=25.0):
         super().__init__()
         ndims = len(inshape)
 
@@ -99,9 +99,16 @@ class TransMorphDiff(nn.Module):
         self.integrate = vxm_layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
         self.transformer = vxm_layers.SpatialTransformer(inshape)
 
+        self.prior_lambda = prior_lambda
         # filled in on every `forward()` call; available to anyone who wants to add it to the loss function
         self.last_kl_loss = None
-    
+
+    def _diffusion_penalty(self, field):
+        dy = (field[:, :, 1:, :] - field[:, :, :-1, :]) ** 2
+        dx = (field[:, :, :, 1:] - field[:, :, :, :-1]) ** 2
+
+        return (dy.mean() + dx.mean()) / 2.0
+
     def forward(self, source, target, registration=False):
         x = torch.cat([source, target], dim=1)
 
@@ -127,7 +134,11 @@ class TransMorphDiff(nn.Module):
         flow_mean = self.flow_mean_head(u4)
         flow_logvar = self.flow_logvar_head(u4)
 
-        self.last_kl_loss = -0.5 * torch.mean(1 + flow_logvar - flow_mean.pow(2) - flow_logvar.exp())
+        # dalca/chen-style KL: sigma_term (weighted by the degree of neighbors)
+        degree = 4.0 # approximation of the degree of neighbors in 2D (4-connectivity)
+        sigma_term = torch.mean(self.prior_lambda * degree * torch.exp(flow_logvar) - flow_logvar)
+        prec_term = self._diffusion_penalty(flow_mean)
+        self.last_kl_loss = 0.5 * (sigma_term + prec_term)
 
         if self.training:
             std = torch.exp(0.5 * flow_logvar)
