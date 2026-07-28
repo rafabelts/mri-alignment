@@ -7,7 +7,21 @@ from src.train import benchmark_model
 
 def denormalize(array_normalized, mean, std):
     """Reverts z-score normalization: x = x_norm * std + mean."""
-    array_normalized * std + mean
+    return array_normalized * std + mean
+
+def save_as_mha(array, spatial_meta, output_path):
+    """
+    Saves a numpy array as .mha conserving the right metadata for the file
+    """
+
+    array = array.astype(np.float32)
+    sitk_array = array[np.newaxis, ...] # add the axis that squeeze deleted
+
+    img = sitk.GetImageFromArray(sitk_array, isVector=(array.ndim == 3))
+    img.SetSpacing(spatial_meta["spacing"])
+    img.SetOrigin(spatial_meta["origin"])
+    img.SetDirection(spatial_meta["direction"])
+    sitk.WriteImage(img, str(output_path))
 
 def padded_shape(h, w, multiple=16):
     # calculates the nearest larger size (h, w) that is a multiple of multiple param
