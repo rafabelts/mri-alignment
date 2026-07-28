@@ -5,6 +5,18 @@ from scipy.ndimage import map_coordinates
 from src.models import build_model, load_weights_any_shape
 from src.train import benchmark_model
 
+def hann_weight_map(patch_size):
+    """Generates a 2D Hann type map: 1.0 in the center, ~0 in borders."""
+    h, w = patch_size
+
+    wy = np.hanning(h)
+    wx = np.hanning(w)
+
+    weight_2d = np.outer(wy, wx)
+    weight_2d = np.clip(weight_2d, 1e-3, None)  # avoit exact ceros in the edge
+
+    return weight_2d.astype(np.float32)
+
 def denormalize(array_normalized, mean, std):
     """Reverts z-score normalization: x = x_norm * std + mean."""
     return array_normalized * std + mean

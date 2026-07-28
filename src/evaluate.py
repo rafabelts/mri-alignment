@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
 from skimage.metrics import structural_similarity as ssim, hausdorff_distance
+from src.io_utils import hann_weight_map
 
 def inference_with_reconstruction(model, loader, device="cuda"):
     """
@@ -16,6 +17,7 @@ def inference_with_reconstruction(model, loader, device="cuda"):
         """
     model.eval()
     acc = {}
+    weight_map = hann_weight_map((256, 256))
 
     with torch.no_grad():
         for img_fixed, img_moving, gt_dvf, meta in loader:
@@ -48,14 +50,16 @@ def inference_with_reconstruction(model, loader, device="cuda"):
                 ph_eff = min(ph, h - py)
                 pw_eff = min(pw, w - px)
 
-                acc[key]["pred_sum"][py:py + ph_eff, px:px + pw_eff, :] += pred_dvf_np[i, :ph_eff, :pw_eff, :]
-                acc[key]["gt_sum"][py:py + ph_eff, px:px + pw_eff, :] += gt_dvf_np[i, :ph_eff, :pw_eff, :]
-                acc[key]["mask_sum"][py:py + ph_eff, px:px + pw_eff] += mask_np[i, :ph_eff, :pw_eff]
-                acc[key]["count"][py:py + ph_eff, px:px + pw_eff] += 1
+                w_patch = weight_map[:ph_eff, :pw_eff]
+
+                acc[key]["pred_sum"][py:py+ph_eff, px:px+pw_eff, :] += pred_dvf_np[i, :ph_eff, :pw_eff, :] * w_patch[..., None]
+                acc[key]["gt_sum"][py:py+ph_eff, px:px+pw_eff, :] += gt_dvf_np[i, :ph_eff, :pw_eff, :] * w_patch[..., None]
+                acc[key]["mask_sum"][py:py+ph_eff, px:px+pw_eff] += mask_np[i, :ph_eff, :pw_eff] * w_patch
+                acc[key]["count"][py:py+ph_eff, px:px+pw_eff] += w_patch
 
         results = {}
         for key, data in acc.items():
-            count_safe = np.maximum(data["count"], 1)
+            count_safe = np.maximum(data["count"], 1e-6)
             results[key] = {
                 "pred_dvf": data["pred_sum"] / count_safe[..., None],
                 "gt_dvf": data["gt_sum"] / count_safe[..., None],
