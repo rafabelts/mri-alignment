@@ -1,10 +1,10 @@
-# Entorno
+# Environment
 .venv/
 __pycache__/
 *.pyc
 .python-version.local
 
-# Datos y checkpoints (pesan demasiado / no van en git)
+# Data and checkpoints (too large / don't belong in git)
 data/
 checkpoints/*
 !checkpoints/.gitkeep
@@ -19,6 +19,6 @@ checkpoints/*
 .DS_Store
 Thumbs.db
 
-# Resultados generados (figuras, logs)
+# Generated results (figures, logs)
 outputs/
 *.log

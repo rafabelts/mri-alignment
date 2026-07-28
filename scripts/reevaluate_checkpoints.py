@@ -27,6 +27,13 @@ from src.evaluate import inference_with_reconstruction, EvaluationMetric
 from src.train import benchmark_model
 
 def main(model_name, seeds):
+    """
+    Re-evaluates already-trained checkpoints (one per seed in `seeds`) on the
+    test split without retraining. For each seed, saves a per-metric boxplot
+    and a per-case CSV under `outputs/reevaluation_<model_name>/`, then writes
+    a `summary.csv` with mean/std metrics and computational-cost benchmarks
+    across all seeds.
+    """
     device = get_device()
     print(f"Using: {device}")
     
@@ -133,7 +140,7 @@ def main(model_name, seeds):
     for metric_name, values in per_run.items():
         print(f"{metric_name}: {np.mean(values):.4f} ± {np.std(values):.4f} (values: {[round(v, 4) for v in values]})")
 
-    # --- summary.csv -> raiz de la carpeta del modelo ---
+    # --- summary.csv -> model's run folder root ---
     summary_df = pd.DataFrame(summary_rows)
     summary_path = run_dir / "summary.csv"
     summary_df.to_csv(summary_path, index=False)
@@ -143,6 +150,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, choices=["voxelmorph", "transmorph"], default="voxelmorph")
     parser.add_argument("--seeds", type=int, nargs="+", required=True,
-                         help="Exact seeds used in training, ej: --seeds 2697 3078 5111 6369 8506")
+                         help="Exact seeds used in training, e.g.: --seeds 2697 3078 5111 6369 8506")
     args = parser.parse_args()
     main(args.model, args.seeds)

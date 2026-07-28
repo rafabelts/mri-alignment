@@ -84,6 +84,7 @@ class MRICineDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
+        """Returns (fixed, moving, dvf, meta) as (1, H, W) / (2, H, W) tensors, channels-first."""
         img_fixed_np, img_moving_np, dvf_np, meta = self.samples[idx]
 
         img_fixed_pt = torch.from_numpy(img_fixed_np).unsqueeze(0)

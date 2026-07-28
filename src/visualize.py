@@ -13,7 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 def visualize_patches_per_cohort(dataloader, n_per_cohort=2, cohorts=("A", "B", "C"),
                                   stride=20, min_magnitude=0.3, cmap="viridis"):
-    """Muestra `n_per_cohort` patches de cada cohorte (fixed, moving, DVF)."""
+    """Displays `n_per_cohort` patches from each cohort (fixed, moving, DVF), with a quiver overlay showing DVF direction where its magnitude exceeds `min_magnitude`."""
     counts = {c: 0 for c in cohorts}
     total_shown = 0
     total_target = n_per_cohort * len(cohorts)
@@ -80,10 +80,10 @@ def visualize_reconstruction(test_results, ram_fixed, ram_moving, meta_lookup,
                               show_profiles=True, profile_row=210, profile_col=210,
                               overlap_start=167, overlap_end=256):
     """
-    Muestra fixed/moving/warped/DVF para casos de test ya reconstruidos, con
-    métricas de MSE (warped vs moving, y baseline sin warp), y opcionalmente
-    perfiles de línea cruzando la zona de traslape de patches (para
-    verificar que la reconstrucción no introduce discontinuidades).
+    Displays fixed/moving/warped/DVF for already-reconstructed test cases, with
+    MSE metrics (warped vs. moving, and a no-warp baseline), and optionally line
+    profiles crossing the patch-overlap zone (to check that reconstruction
+    doesn't introduce discontinuities at patch boundaries).
     """
     if keys is None:
         if one_per_cohort:
@@ -102,7 +102,7 @@ def visualize_reconstruction(test_results, ram_fixed, ram_moving, meta_lookup,
         seq_id, frame_idx = key
         idx = meta_lookup.get(key)
         if idx is None:
-            print(f"No se encontró imagen completa para {key}")
+            print(f"No full image found for {key}")
             continue
 
         img_fixed_np = ram_fixed[idx]
@@ -115,7 +115,7 @@ def visualize_reconstruction(test_results, ram_fixed, ram_moving, meta_lookup,
         new_y = grid_y + pred_dvf[..., 1]
         new_x = grid_x + pred_dvf[..., 0]
 
-        # warp fixed -> aproxima moving (misma convención que el GT)
+        # warp fixed -> approximates moving (same convention as the GT)
         warped = map_coordinates(img_fixed_np, [new_y, new_x], order=1, mode="constant")
         dvf_mag = np.sqrt((pred_dvf ** 2).sum(axis=-1)) * mask
 

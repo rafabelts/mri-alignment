@@ -24,20 +24,25 @@ def save_as_mha(array, spatial_meta, output_path):
     sitk.WriteImage(img, str(output_path))
 
 def padded_shape(h, w, multiple=16):
-    # calculates the nearest larger size (h, w) that is a multiple of multiple param
+    """Nearest (height, width) >= (h, w) that is a multiple of `multiple`."""
     pad_h = (multiple - h % multiple) % multiple
     pad_w = (multiple - w % multiple) % multiple
     return h + pad_h, w + pad_w
 
 def pad_to_multiple(array, multiple=16):
-    # fills w zero until the closest multiple of 16
+    """Zero-pads `array` (bottom/right) so both spatial dims are a multiple of `multiple`.
+
+    Needed because the model architecture downsamples by 16x internally
+    (4 stride-2 conv layers); external images of arbitrary size must be
+    padded to a compatible resolution before inference.
+    """
     h, w = array.shape[:2]
     ph, pw = padded_shape(h, w, multiple)
     pad_spec = ((0, ph - h), (0, pw - w)) if array.ndim == 2 else ((0, ph - h), (0, pw - w), (0, 0))
     return np.pad(array, pad_spec, mode="constant")
 
 def crop_to_original(array, original_shape):
-    # crop it back to its original size, discarding the added padding
+    """Crops back to `original_shape`, discarding the padding added by `pad_to_multiple`."""
     h, w = original_shape
     return array[:h, :w, ...] if array.ndim > 2 else array[:h, :w]
 

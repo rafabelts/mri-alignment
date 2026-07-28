@@ -26,6 +26,12 @@ from src.train import train_model
 from src.evaluate import inference_with_reconstruction, EvaluationMetric
 
 def main(seeds):
+    """
+    Preprocesses the dataset once, then for each seed in `seeds`: trains
+    `args.model` from scratch, saves training curves and the best checkpoint,
+    evaluates it on the test split, and finally prints mean ± std metrics
+    (EPE, % negative Jacobian, SSIM, Dice, TRE, Hausdorff) across all seeds.
+    """
     device = get_device()
     print(f"Using: {device}")
 

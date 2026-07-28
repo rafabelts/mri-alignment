@@ -76,11 +76,23 @@ class EvaluationMetric:
 
     @staticmethod
     def jacobian_determinant(dvf):
+        """
+        Determinant of the Jacobian of the deformation field `x + dvf` at every
+        pixel. Values <= 0 indicate local folding (a non-physical, non-invertible
+        deformation), used to compute the '% negative Jacobian' metric.
+        """
         dy_dy, dy_dx = np.gradient(dvf[..., 1])
         dx_dy, dx_dx = np.gradient(dvf[..., 0])
         return ((dx_dx + 1) * (dy_dy + 1)) - (dx_dy * dy_dx)
 
     def compute_ssim(self, key, pred_dvf):
+        """
+        Warps the fixed image with `pred_dvf` and computes SSIM against the real
+        moving image, as a reference-based proxy for registration quality
+        (independent of the GT DVF). Returns None if the raw images/lookup
+        weren't provided to this instance, or if the moving image has zero
+        dynamic range.
+        """
         if self.ram_fixed is None or self.meta_lookup is None:
             return None
 
@@ -106,6 +118,15 @@ class EvaluationMetric:
         return ssim(img_moving_np, warped, data_range=data_range)
 
     def evaluate_reconstructed(self):
+        """
+        Computes EPE (against GT DVF, masked to anatomy), % negative Jacobian,
+        and SSIM for every case in `self.results`, printing the mean ± std
+        across cases and storing per-case values in `self.per_case_reconstructed`.
+
+        Returns
+        -------
+        epe_list, pct_neg_jac_list, ssim_list : list[float]
+        """
         epe_list, pct_neg_jac_list, ssim_list = [], [], []
         self.per_case_reconstructed = {}
 
@@ -206,5 +227,6 @@ class EvaluationMetric:
 
     @staticmethod
     def _centroid(mask):
+        """Pixel-coordinate (row, col) centroid of a binary mask, or None if empty."""
         ys, xs = np.where(mask > 0)
         return np.array([ys.mean(), xs.mean()]) if len(ys) > 0 else None

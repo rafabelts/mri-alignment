@@ -1,6 +1,15 @@
+"""
+Generates a qualitative side-by-side comparison figure (VoxelMorph vs. TransMorph
+vs. ground truth) for one or more test cases, and exports the underlying
+fixed/warped/DVF/propagated-segmentation volumes as .mha files.
+
+Usage:
+    uv run python scripts/generate_comparison_figure.py --cases A_024:095 B_021:017
+"""
+
 import sys
 import argparse
-import pathlib import Path
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -23,6 +32,7 @@ from src.io_utils import save_as_mha, denormalize
 DEFAULT_CASES = ["A_024:095", "B_021:017", "C_008:007"]
 
 def warp_image(img_fixed_np, pred_dvf):
+    """Warps `img_fixed_np` with `pred_dvf` (H, W, 2) via bilinear interpolation."""
     h, w = img_fixed_np.shape
     grid_y, grid_x = np.mgrid[0:h, 0:w]
     new_y = grid_y + pred_dvf[..., 1]
@@ -31,6 +41,7 @@ def warp_image(img_fixed_np, pred_dvf):
     return map_coordinates(img_fixed_np, [new_y, new_x], order=1, mode="constant")
 
 def propagate_segmentation(seg_fixed, pred_dvf):
+    """Propagates `seg_fixed` onto the moving frame with `pred_dvf`, nearest-neighbor (binary mask)."""
     h, w = seg_fixed.shape
     grid_y, grid_x = np.mgrid[0:h, 0:w]
     new_y = grid_y + pred_dvf[..., 1]
@@ -38,15 +49,26 @@ def propagate_segmentation(seg_fixed, pred_dvf):
     return map_coordinates(seg_fixed, [new_y, new_x], order=0, mode="constant")
 
 def epe_map(pred_dvf, gt_dvf, mask):
+    """Per-pixel endpoint error between `pred_dvf` and `gt_dvf` (both (H, W, 2)), masked to the anatomy region."""
     diff = pred_dvf - gt_dvf
-    epe = np.sqrt((diff ** 2).sum(axis=1))
+    epe = np.sqrt((diff ** 2).sum(axis=-1))
     return epe * mask
 
 def plot_contour(ax, mask, color, linewidth=1.5):
+    """Draws the 0.5-level contour(s) of a binary `mask` on `ax`."""
     for contour in find_contours(mask.astype(float), level=0.5):
         ax.plot(contour[:, 1], contour[:,0], color=color, linewidth=linewidth)
 
 def get_single_case(seq_id, frame_idx):
+    """
+    Preprocesses only `seq_id` and wraps the single (fixed, moving, dvf, frame_idx)
+    pair into a one-sample DataLoader, for running inference on one specific case
+    without preprocessing the whole test split.
+
+    Returns
+    -------
+    dict with keys: 'fixed_np', 'moving_np', 'gt_dvf', 'meta', 'loader'.
+    """
     ram_fixed, ram_moving, ram_dvf, ram_meta = preprocess_dataset(config.DATA_DIR, [seq_id])
     lookup = build_lookup(ram_meta)
     key = (seq_id, frame_idx)
@@ -66,6 +88,13 @@ def get_single_case(seq_id, frame_idx):
     }
 
 def run_dl_model(model_name, checkpoint_name, loader, device):
+    """Loads `checkpoint_name` for `model_name` and runs inference on `loader` (a single case).
+
+    Returns
+    -------
+    pred_dvf : np.ndarray (H, W, 2)
+    anatomy_mask : np.ndarray (H, W) bool
+    """
     checkpoint_path = config.CHECKPOINT_DIR / checkpoint_name
     model = build_model(model_name, device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -76,9 +105,17 @@ def run_dl_model(model_name, checkpoint_name, loader, device):
     return results[key]["pred_dvf"], results[key]["anatomy_mask"]
 
 def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, device):
+    """
+    Runs both VoxelMorph and TransMorph on a single (patient, frame) case, saves
+    a 2x4 comparison figure (reference, each model's warped image with GT/propagated
+    tumor contours, and each model's EPE error map) to
+    `outputs/comparison_<patient>_<frame>.png`, and exports the fixed/moving/warped/
+    DVF/propagated-segmentation volumes as .mha files under
+    `outputs/comparison_exports/<patient>_<frame>/`.
+    """
     print(f"{'=' * 60} Case: {patient} frame {frame}\n{'=' * 60}")
     
-    ase = get_single_case(patient, frame)
+    case = get_single_case(patient, frame)
     fixed_np, moving_np, gt_dvf = case["fixed_np"], case["moving_np"], case["gt_dvf"]
     meta = case["meta"]
     seg_fixed, seg_moving = meta["seg_fixed"], meta["seg_moving"]
@@ -142,8 +179,9 @@ def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, devi
     print(f"Exports .mha saved in {export_dir}")
 
 def main(cases, vxm_checkpoint, tm_checkpoint):
+    """Generates a comparison figure for each "patient:frame" string in `cases`."""
     device = get_device()
-    print(f"Usando dispositivo: {device}")
+    print(f"Using device: {device}")
 
     for case_str in cases:
         patient, frame = case_str.split(":")
@@ -153,7 +191,7 @@ def main(cases, vxm_checkpoint, tm_checkpoint):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=str, nargs="+", default=DEFAULT_CASES,
-                         help="Formato patient:frame, ej: A_024:095 B_021:017 C_008:007")
+                         help="Format patient:frame, e.g.: A_024:095 B_021:017 C_008:007")
     parser.add_argument("--vxm-checkpoint", type=str, default="best_voxelmorph.pt")
     parser.add_argument("--tm-checkpoint", type=str, default="best_transmorph.pt")
     args = parser.parse_args()

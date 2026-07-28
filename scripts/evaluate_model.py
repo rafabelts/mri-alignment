@@ -24,6 +24,12 @@ from src.evaluate import inference_with_reconstruction, EvaluationMetric
 from src.train import benchmark_model
 
 def main(model_name, checkpoint_name):
+    """
+    Loads `checkpoint_name` for `model_name`, reconstructs full test images
+    from patches, prints registration metrics (EPE, % negative Jacobian, SSIM,
+    Dice, TRE, Hausdorff) and a computational-cost benchmark (params,
+    inference time, FPS, peak GPU memory) at batch_size=1.
+    """
     device = get_device()
     print(f"Using device: {device}")
 

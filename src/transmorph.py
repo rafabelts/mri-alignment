@@ -26,6 +26,8 @@ import torch.nn as nn
 from voxelmorph.torch import layers as vxm_layers
 
 class ConvBlock(nn.Module):
+    """3x3 conv + LeakyReLU(0.2). `stride=2` halves spatial resolution (used in the encoder)."""
+
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1)
@@ -104,12 +106,38 @@ class TransMorphDiff(nn.Module):
         self.last_kl_loss = None
 
     def _diffusion_penalty(self, field):
+        """Mean squared spatial gradient of `field` (used as the KL precision term)."""
         dy = (field[:, :, 1:, :] - field[:, :, :-1, :]) ** 2
         dx = (field[:, :, :, 1:] - field[:, :, :, :-1]) ** 2
 
         return (dy.mean() + dx.mean()) / 2.0
 
     def forward(self, source, target, registration=False):
+        """
+        Predicts the DVF that warps `source` onto `target` and applies it.
+
+        Also sets `self.last_kl_loss` as a side effect (mean + smoothness
+        regularization on the predicted velocity field, weighted by
+        `prior_lambda`), for the caller to add to the training loss.
+
+        Parameters
+        ----------
+        source, target : torch.Tensor
+            (B, 1, H, W) images.
+        registration : bool
+            If False (training), returns the pre-integration flow
+            (`preint_flow`), needed to compute the supervised DVF loss on the
+            same field the KL term regularizes. If True (inference/eval),
+            returns the final integrated flow (`pos_flow`), i.e. the actual
+            displacement field used to produce `y_source`.
+
+        Returns
+        -------
+        y_source : torch.Tensor
+            `source` warped by the predicted (fully integrated) flow.
+        flow : torch.Tensor
+            `preint_flow` or `pos_flow` depending on `registration`.
+        """
         x = torch.cat([source, target], dim=1)
 
         d1 = self.down1(x)

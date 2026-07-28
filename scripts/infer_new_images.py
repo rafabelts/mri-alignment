@@ -15,6 +15,12 @@ from src.io_utils import infer_on_external_images
 
 
 def main(fixed_path, moving_path, model_name, checkpoint_name, prefix):
+    """
+    Runs `model_name` on a fixed/moving pair that lives outside the training
+    dataset (arbitrary resolution, padded to a multiple of 16), and exports
+    the fixed image, warped image, and predicted DVF as `.mha` files under
+    `outputs/external_inference/`.
+    """
     device = get_device()
     print(f"Using device: {device}")
 

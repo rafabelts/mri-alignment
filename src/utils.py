@@ -9,6 +9,11 @@ def get_device():
 
 
 def set_seed(seed=42, deterministic=True):
+    """Seeds python/numpy/torch (CPU + CUDA) for reproducibility.
+
+    If `deterministic`, also forces cuDNN into deterministic mode (disables
+    autotuned/non-deterministic kernels), at some performance cost.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

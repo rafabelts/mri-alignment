@@ -8,6 +8,12 @@ from config import LAMBDA_DVF, LAMBDA_SMOOTH, CHARBONNIER_EPS
 
 
 class Loss:
+    """
+    Supervised registration loss: Charbonnier EPE against the ground-truth DVF
+    (masked to the anatomy region if `mask` is given) plus a 2D smoothness
+    regularizer on the predicted DVF.
+    """
+
     def __init__(self, pred_dvf, gt_dvf, mask=None,
                  lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH, eps=CHARBONNIER_EPS):
         self.pred_dvf = pred_dvf
@@ -39,6 +45,15 @@ class Loss:
         return (torch.mean(dx) + torch.mean(dy)) / 2.0
 
     def total_loss(self):
+        """Weighted sum of the EPE and smoothness terms.
+
+        Returns
+        -------
+        l_total : torch.Tensor
+            Scalar loss to call `.backward()` on.
+        parts : dict
+            {'epe': float, 'smooth': float} unweighted component values, for logging.
+        """
         l_epe = self.charbonnier_epe_loss()
         l_smooth = self.smoothness_loss()
         l_total = self.lambda_dvf * l_epe + self.lambda_smooth * l_smooth

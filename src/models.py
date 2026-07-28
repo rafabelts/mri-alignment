@@ -8,6 +8,23 @@ import voxelmorph as vxm
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
 def build_model(model_name, device, inshape=None):
+    """
+    Factory for the two registration architectures used in this project.
+
+    Parameters
+    ----------
+    model_name : str
+        'voxelmorph' or 'transmorph'.
+    device : str
+        'cuda' or 'cpu'.
+    inshape : tuple[int, int], optional
+        Overrides the default (256, 256) input shape (e.g. to run inference
+        on full-size external images padded to a different resolution).
+
+    Returns
+    -------
+    torch.nn.Module
+    """
     if model_name == 'voxelmorph':
         return _build_voxelmorph(device, inshape=inshape) if inshape else _build_voxelmorph(device)
     elif model_name == 'transmorph':
@@ -33,6 +50,7 @@ def _build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
     return model
 
 def _build_transmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS, int_downsize=VXM_INT_DOWNSIZE):
+    """Builds a TransMorphDiff instance (see src/transmorph.py)."""
     from src.transmorph import TransMorphDiff
     model = TransMorphDiff(inshape=inshape, int_steps=int_steps, int_downsize=int_downsize).to(device)
     return model
