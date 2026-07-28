@@ -82,12 +82,6 @@ def get_single_case(seq_id, frame_idx):
     dataset = MRICineDataset([ram_fixed[idx]], [ram_moving[idx]], [ram_dvf[idx]], [meta])
     loader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=False)
 
-    # agrega esto temporalmente dentro de get_single_case(), después de crear el dataset:
-    print(f"Número de samples en el dataset: {len(dataset)}")
-    for i in range(len(dataset)):
-        _, _, _, meta = dataset.samples[i]
-        print(f"  Sample {i}: patch_coords={meta['patch_coords']}, is_patchified={meta['is_patchified']}")
-
     return {
         "fixed_np": ram_fixed[idx], "moving_np": ram_moving[idx],
         "gt_dvf": ram_dvf[idx], "meta": meta, "loader": loader,
