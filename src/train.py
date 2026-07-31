@@ -41,14 +41,18 @@ def train_model(model, train_loader, val_loader, device,
 
     history = {
         "train_loss": [], "train_epe": [], "train_smooth": [],
-        "val_loss": [], "val_epe": [], "val_smooth": [],
+        "val_loss": [], "val_epe": [], "val_smooth": [], "epoch_time": [],
     }
 
     for epoch in range(n_epochs):
+        epoch_start = time.perf_counter()
+
         train_metrics = _run_epoch(model, train_loader, device, lambda_dvf, lambda_smooth, lambda_kl,
                                     optimizer=optimizer, grad_clip_max_norm=grad_clip_max_norm)
 
         val_metrics = _run_epoch(model, val_loader, device, lambda_dvf, lambda_smooth, lambda_kl, optimizer=None)
+
+        epoch_time = time.perf_counter() - epoch_start
 
         scheduler.step(val_metrics["loss"])
 
@@ -56,8 +60,9 @@ def train_model(model, train_loader, val_loader, device,
             history[f"train_{k}"].append(v)
         for k, v in val_metrics.items():
             history[f"val_{k}"].append(v)
+        history["epoch_time"].append(epoch_time)
 
-        print(f"Epoch {epoch + 1}/{n_epochs}")
+        print(f"Epoch {epoch + 1}/{n_epochs} ({epoch_time:.1f}s)")
         print(f"  train -> loss: {train_metrics['loss']:.4f} | epe: {train_metrics['epe']:.4f} "
               f"| smooth: {train_metrics['smooth']:.4f}")
         print(f"  val   -> loss: {val_metrics['loss']:.4f} | epe: {val_metrics['epe']:.4f} "

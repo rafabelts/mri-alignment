@@ -6,7 +6,8 @@
 import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
-from skimage.metrics import structural_similarity as ssim, hausdorff_distance
+from scipy.spatial import cKDTree
+from skimage.metrics import structural_similarity as ssim
 from src.io_utils import hann_weight_map
 
 def inference_with_reconstruction(model, loader, device="cuda"):
@@ -180,14 +181,19 @@ class EvaluationMetric:
             if seg_fixed is None or seg_moving is None:
                 continue
 
+            # sitk spacing is (x, y, z); centroids/bboxes are (row=y, col=x)
+            spacing = meta["spatial_meta"]["spacing"]
+            spacing_yx = np.array([spacing[1], spacing[0]])
+
             # segmentation bounding box
             ys, xs = np.where(seg_moving > 0)
             if len(ys) > 0:
                 bbox_h = ys.max() - ys.min() + 1
                 bbox_w = xs.max() - xs.min() + 1
                 bbox_diag = np.sqrt(bbox_h ** 2 + bbox_w ** 2)
+                bbox_diag_mm = np.sqrt((bbox_h * spacing_yx[0]) ** 2 + (bbox_w * spacing_yx[1]) ** 2)
             else:
-                bbox_h = bbox_w = bbox_diag = np.nan
+                bbox_h = bbox_w = bbox_diag = bbox_diag_mm = np.nan
 
             pred_dvf = r["pred_dvf"]
             h, w = seg_fixed.shape
@@ -203,31 +209,48 @@ class EvaluationMetric:
             dice_list.append(dice_val)
 
             hd_val = np.nan
-            # Hausdorff Distance
+            # Hausdorff Distance (mm)
             if (warped_seg > 0).any() and (seg_moving > 0).any():
-                hd_val = hausdorff_distance(warped_seg > 0, seg_moving > 0)
+                hd_val = self._hausdorff_mm(warped_seg > 0, seg_moving > 0, spacing_yx)
             hd_list.append(hd_val)
 
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
             tre_val = np.nan
             if c_pred is not None and c_real is not None:
-                tre_val = np.linalg.norm(c_pred - c_real)
+                tre_val = np.linalg.norm((c_pred - c_real) * spacing_yx)  # mm
             tre_list.append(tre_val)
 
             self.per_case_segmentation[key] = {
                 "dice": dice_val, "tre": tre_val, "hausdorff": hd_val,
                 "tumor_area_px": int((seg_moving > 0).sum()),
                 "bbox_diag": bbox_diag,
-                "hausdorff_norm_bbox": hd_val / bbox_diag if bbox_diag else np.nan,
-                "tre_norm_bbox": tre_val / bbox_diag if bbox_diag else np.nan,
+                "bbox_diag_mm": bbox_diag_mm,
+                "hausdorff_norm_bbox": hd_val / bbox_diag_mm if bbox_diag_mm else np.nan,
+                "tre_norm_bbox": tre_val / bbox_diag_mm if bbox_diag_mm else np.nan,
             }
 
         print(f"Dice: {np.nanmean(dice_list):.4f} ± {np.nanstd(dice_list):.4f}")
-        print(f"Hausdorff Distance: {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
-        print(f"TRE: {np.nanmean(tre_list):.4f} ± {np.nanstd(tre_list):.4f}")
+        print(f"Hausdorff Distance (mm): {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
+        print(f"TRE (mm): {np.nanmean(tre_list):.4f} ± {np.nanstd(tre_list):.4f}")
 
         return dice_list, tre_list, hd_list
+
+    @staticmethod
+    def _hausdorff_mm(mask_a, mask_b, spacing_yx):
+        """Standard (symmetric) Hausdorff distance in mm between nonzero pixels
+        of two masks, scaling pixel coordinates by per-axis spacing before the
+        nearest-neighbor search (equivalent to skimage's pixel-space version,
+        but physically correct under anisotropic spacing)."""
+        a_points = np.transpose(np.nonzero(mask_a)) * spacing_yx
+        b_points = np.transpose(np.nonzero(mask_b)) * spacing_yx
+        if len(a_points) == 0:
+            return 0.0 if len(b_points) == 0 else np.inf
+        if len(b_points) == 0:
+            return np.inf
+        fwd = cKDTree(a_points).query(b_points, k=1)[0]
+        bwd = cKDTree(b_points).query(a_points, k=1)[0]
+        return max(fwd.max(), bwd.max())
 
     @staticmethod
     def _centroid(mask):
