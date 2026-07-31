@@ -4,6 +4,7 @@
 """
 
 import numpy as np
+import SimpleITK as sitk
 import torch
 from scipy.ndimage import map_coordinates
 from scipy.spatial import cKDTree
@@ -181,9 +182,7 @@ class EvaluationMetric:
             if seg_fixed is None or seg_moving is None:
                 continue
 
-            # sitk spacing is (x, y, z); centroids/bboxes are (row=y, col=x)
-            spacing = meta["spatial_meta"]["spacing"]
-            spacing_yx = np.array([spacing[1], spacing[0]])
+            spatial_meta = meta["spatial_meta"]
 
             # segmentation bounding box
             ys, xs = np.where(seg_moving > 0)
@@ -191,7 +190,8 @@ class EvaluationMetric:
                 bbox_h = ys.max() - ys.min() + 1
                 bbox_w = xs.max() - xs.min() + 1
                 bbox_diag = np.sqrt(bbox_h ** 2 + bbox_w ** 2)
-                bbox_diag_mm = np.sqrt((bbox_h * spacing_yx[0]) ** 2 + (bbox_w * spacing_yx[1]) ** 2)
+                p_min, p_max = self._physical_points([(ys.min(), xs.min()), (ys.max(), xs.max())], spatial_meta)
+                bbox_diag_mm = float(np.linalg.norm(p_max - p_min))
             else:
                 bbox_h = bbox_w = bbox_diag = bbox_diag_mm = np.nan
 
@@ -211,14 +211,15 @@ class EvaluationMetric:
             hd_val = np.nan
             # Hausdorff Distance (mm)
             if (warped_seg > 0).any() and (seg_moving > 0).any():
-                hd_val = self._hausdorff_mm(warped_seg > 0, seg_moving > 0, spacing_yx)
+                hd_val = self._hausdorff_mm(warped_seg > 0, seg_moving > 0, spatial_meta)
             hd_list.append(hd_val)
 
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
             tre_val = np.nan
             if c_pred is not None and c_real is not None:
-                tre_val = np.linalg.norm((c_pred - c_real) * spacing_yx)  # mm
+                p_pred, p_real = self._physical_points([c_pred, c_real], spatial_meta)
+                tre_val = float(np.linalg.norm(p_pred - p_real))  # mm
             tre_list.append(tre_val)
 
             self.per_case_segmentation[key] = {
@@ -237,13 +238,14 @@ class EvaluationMetric:
         return dice_list, tre_list, hd_list
 
     @staticmethod
-    def _hausdorff_mm(mask_a, mask_b, spacing_yx):
+    def _hausdorff_mm(mask_a, mask_b, spatial_meta):
         """Standard (symmetric) Hausdorff distance in mm between nonzero pixels
-        of two masks, scaling pixel coordinates by per-axis spacing before the
-        nearest-neighbor search (equivalent to skimage's pixel-space version,
-        but physically correct under anisotropic spacing)."""
-        a_points = np.transpose(np.nonzero(mask_a)) * spacing_yx
-        b_points = np.transpose(np.nonzero(mask_b)) * spacing_yx
+        of two masks, converting pixel coordinates to physical space via the
+        image's actual spacing/origin/direction before the nearest-neighbor
+        search (correct under anisotropic spacing and non-identity direction,
+        not just axis-aligned isotropic spacing)."""
+        a_points = EvaluationMetric._physical_points(np.transpose(np.nonzero(mask_a)), spatial_meta)
+        b_points = EvaluationMetric._physical_points(np.transpose(np.nonzero(mask_b)), spatial_meta)
         if len(a_points) == 0:
             return 0.0 if len(b_points) == 0 else np.inf
         if len(b_points) == 0:
@@ -257,3 +259,28 @@ class EvaluationMetric:
         """Pixel-coordinate (row, col) centroid of a binary mask, or None if empty."""
         ys, xs = np.where(mask > 0)
         return np.array([ys.mean(), xs.mean()]) if len(ys) > 0 else None
+
+    @staticmethod
+    def _physical_points(points_yx, spatial_meta):
+        """
+        Converts an array of (row, col) pixel coordinates into physical-space
+        (mm) coordinates, via a throwaway SimpleITK image carrying the case's
+        actual spacing/origin/direction. Delegates the index-to-physical math
+        to ITK itself instead of assuming axis-aligned isotropic spacing.
+        """
+        points_yx = list(points_yx)
+        if len(points_yx) == 0:
+            return np.empty((0, 3))
+
+        ref = sitk.Image(1, 1, 1, sitk.sitkUInt8)
+        ref.SetSpacing(spatial_meta["spacing"])
+        ref.SetOrigin(spatial_meta["origin"])
+        ref.SetDirection(spatial_meta["direction"])
+
+        # sitk index order is (x=col, y=row, z); every case is a single 2D
+        # slice, so z is always 0 - it contributes an identical constant to
+        # every point here and cancels out in any distance between them.
+        return np.array([
+            ref.TransformContinuousIndexToPhysicalPoint((float(x), float(y), 0.0))
+            for y, x in points_yx
+        ])

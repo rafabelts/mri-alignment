@@ -192,8 +192,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=str, nargs="+", default=DEFAULT_CASES,
                          help="Format patient:frame, e.g.: A_024:095 B_021:017 C_008:007")
-    parser.add_argument("--vxm-checkpoint", type=str, default="best_voxelmorph.pt")
-    parser.add_argument("--tm-checkpoint", type=str, default="best_transmorph.pt")
+    parser.add_argument("--vxm-checkpoint", type=str, default="nested_cv/voxelmorph/best_model/best_model.pt")
+    parser.add_argument("--tm-checkpoint", type=str, default="nested_cv/transmorph/best_model/best_model.pt")
     args = parser.parse_args()
 
     main(args.cases, args.vxm_checkpoint, args.tm_checkpoint)

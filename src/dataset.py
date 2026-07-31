@@ -6,9 +6,10 @@ images, spliting them in 256 x 256 patches when original image is bigger.
 import os
 from collections import Counter
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 
 from config import TEST_SIZE, VAL_TEST_SPLIT, RANDOM_STATE, TARGET_SIZE
 from src.preprocessing import extract_patches
@@ -39,6 +40,43 @@ def split_patients(data_dir, test_size=TEST_SIZE, val_test_split=VAL_TEST_SPLIT,
         print("Test: ", Counter(s.split("_")[0] for s in test_dirs))
 
     return train_dirs, val_dirs, test_dirs
+
+
+def cv_splits(data_dir, outer_k, inner_k, random_state=RANDOM_STATE):
+    """
+    Builds a nested cross-validation split at the patient level, stratified by
+    cohort (first letter of the folder name), with no patient leakage (each
+    patient folder is an atomic unit).
+
+    Returns
+    -------
+    list[dict], one entry per outer fold, each with:
+        "outer_train": list[str], "outer_test": list[str]
+        "inner_folds": list[tuple[list[str], list[str]]] of length `inner_k`,
+            each a (inner_train, inner_val) pair drawn from "outer_train"
+    """
+    data_dir = str(data_dir)
+    subdirs = np.array(sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]))
+    groups = np.array([s.split("_")[0] for s in subdirs])
+
+    outer_skf = StratifiedKFold(n_splits=outer_k, shuffle=True, random_state=random_state)
+    folds = []
+
+    for outer_train_idx, outer_test_idx in outer_skf.split(subdirs, groups):
+        outer_train = subdirs[outer_train_idx].tolist()
+        outer_test = subdirs[outer_test_idx].tolist()
+        outer_train_groups = groups[outer_train_idx]
+
+        inner_skf = StratifiedKFold(n_splits=inner_k, shuffle=True, random_state=random_state)
+        inner_folds = []
+        for inner_train_idx, inner_val_idx in inner_skf.split(outer_train, outer_train_groups):
+            inner_train = [outer_train[i] for i in inner_train_idx]
+            inner_val = [outer_train[i] for i in inner_val_idx]
+            inner_folds.append((inner_train, inner_val))
+
+        folds.append({"outer_train": outer_train, "outer_test": outer_test, "inner_folds": inner_folds})
+
+    return folds
 
 
 class MRICineDataset(Dataset):
