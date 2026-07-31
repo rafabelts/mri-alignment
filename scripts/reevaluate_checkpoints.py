@@ -79,7 +79,7 @@ def main(model_name):
             )
 
             model = build_model(model_name, device)
-            model.load_state_dict(torch.load(ckpt_path, map_location=device))
+            model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
             model.eval()
 
             test_results = inference_with_reconstruction(

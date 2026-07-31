@@ -175,7 +175,7 @@ class NestedCVRunner:
             checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
             lr=cfg["lr"], lambda_smooth=cfg["lambda_smooth"],
         )
-        model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
+        model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
         model.eval()
 
         dice = evaluate_dice(model, val_loader, val_data[0], val_data[1], val_data[3], self.device)
@@ -229,7 +229,7 @@ class NestedCVRunner:
             checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
             lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
         )
-        model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
+        model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
         model.eval()
 
         metrics = evaluate_full(model, test_loader, test_data[0], test_data[1], test_data[3], self.device)
@@ -290,7 +290,7 @@ class NestedCVRunner:
                 checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
                 lr=theta_final["lr"], lambda_smooth=theta_final["lambda_smooth"],
             )
-            model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
+            model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
             model.eval()
             dice = evaluate_dice(model, val_loader, val_data[0], val_data[1], val_data[3], self.device)
 

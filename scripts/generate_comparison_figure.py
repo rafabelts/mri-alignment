@@ -97,7 +97,7 @@ def run_dl_model(model_name, checkpoint_name, loader, device):
     """
     checkpoint_path = config.CHECKPOINT_DIR / checkpoint_name
     model = build_model(model_name, device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     model.eval()
 
     results = inference_with_reconstruction(model, loader, device=device)

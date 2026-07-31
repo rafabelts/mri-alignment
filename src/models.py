@@ -67,7 +67,7 @@ def load_weights_any_shape(model, state_dict_path, device):
     """
     import torch
 
-    state_dict = torch.load(state_dict_path, map_location=device)
+    state_dict = torch.load(state_dict_path, map_location=device, weights_only=True)
     filtered = {k: v for k, v in state_dict.items() if "grid" not in k}
     model.load_state_dict(filtered, strict=False)
     model.eval()
