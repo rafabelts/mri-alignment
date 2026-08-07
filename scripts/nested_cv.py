@@ -22,30 +22,30 @@ Usage:
     uv run python scripts/nested_cv.py --model voxelmorph --plot-only  # re-aggregate + re-plot without training
 """
 
-import os
-import sys
-import json
-import shutil
 import argparse
 import itertools
-from pathlib import Path
+import json
+import os
+import shutil
+import sys
 from collections import Counter
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
 
 import config
-from src.utils import get_device, set_seed
-from src.preprocessing import preprocess_dataset
-from src.dataset import cv_splits, MRICineDataset, build_lookup
+from src.dataset import MRICineDataset, build_lookup, cv_splits
+from src.evaluate import EvaluationMetric, inference_with_reconstruction
 from src.models import build_model
+from src.preprocessing import preprocess_dataset
 from src.train import train_model
-from src.evaluate import inference_with_reconstruction, EvaluationMetric
+from src.utils import get_device, set_seed
 
 # --- Nested CV design ---
 OUTER_K = 5
@@ -61,8 +61,10 @@ INTERNAL_VAL_FRACTION = 0.15
 
 
 def grid_configs():
-    return [{"lambda_smooth": ls, "lr": lr}
-            for ls, lr in itertools.product(LAMBDA_SMOOTH_GRID, LEARNING_RATE_GRID)]
+    return [
+        {"lambda_smooth": ls, "lr": lr}
+        for ls, lr in itertools.product(LAMBDA_SMOOTH_GRID, LEARNING_RATE_GRID)
+    ]
 
 
 def seeds_for(n, master_seed=MASTER_SEED):
@@ -74,8 +76,12 @@ def subset_by_patients(ram_fixed, ram_moving, ram_dvf, ram_meta, subdirs):
     """Filters the full preprocessed dataset down to the given patient folders."""
     subdirs = set(subdirs)
     idx = [i for i, m in enumerate(ram_meta) if m["seq_id"] in subdirs]
-    return ([ram_fixed[i] for i in idx], [ram_moving[i] for i in idx],
-             [ram_dvf[i] for i in idx], [ram_meta[i] for i in idx])
+    return (
+        [ram_fixed[i] for i in idx],
+        [ram_moving[i] for i in idx],
+        [ram_dvf[i] for i in idx],
+        [ram_meta[i] for i in idx],
+    )
 
 
 def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle):
@@ -83,7 +89,9 @@ def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle):
     return DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=shuffle)
 
 
-def internal_train_val_split(subdirs, val_fraction=INTERNAL_VAL_FRACTION, random_state=config.RANDOM_STATE):
+def internal_train_val_split(
+    subdirs, val_fraction=INTERNAL_VAL_FRACTION, random_state=config.RANDOM_STATE
+):
     """
     Carves a small validation slice out of `subdirs`, stratified by cohort,
     used only for epoch-level checkpoint selection during training - never
@@ -91,11 +99,15 @@ def internal_train_val_split(subdirs, val_fraction=INTERNAL_VAL_FRACTION, random
     """
     groups = [s.split("_")[0] for s in subdirs]
     try:
-        return train_test_split(subdirs, test_size=val_fraction, random_state=random_state, stratify=groups)
+        return train_test_split(
+            subdirs, test_size=val_fraction, random_state=random_state, stratify=groups
+        )
     except ValueError:
         # too few members in some cohort (or the resulting split is smaller than
         # the number of cohorts) to stratify; fall back to a plain random split
-        return train_test_split(subdirs, test_size=val_fraction, random_state=random_state)
+        return train_test_split(
+            subdirs, test_size=val_fraction, random_state=random_state
+        )
 
 
 def evaluate_dice(model, loader, ram_fixed, ram_moving, ram_meta, device):
@@ -108,12 +120,15 @@ def evaluate_dice(model, loader, ram_fixed, ram_moving, ram_meta, device):
 def evaluate_full(model, loader, ram_fixed, ram_moving, ram_meta, device):
     results = inference_with_reconstruction(model, loader, device=device)
     metric = EvaluationMetric(results, ram_fixed, ram_moving, build_lookup(ram_meta))
-    epe_list, jac_list, ssim_list = metric.evaluate_reconstructed()
+    epe_list, jac_list, ssim_list = metric.evaluate_reconstructed(ram_meta)
     dice_list, tre_list, hd_list = metric.evaluate_segmentation(ram_meta)
     return {
-        "epe": float(np.nanmean(epe_list)), "jacobian": float(np.nanmean(jac_list)),
-        "ssim": float(np.nanmean(ssim_list)), "dice": float(np.nanmean(dice_list)),
-        "tre": float(np.nanmean(tre_list)), "hausdorff": float(np.nanmean(hd_list)),
+        "epe": float(np.nanmean(epe_list)),
+        "jacobian": float(np.nanmean(jac_list)),
+        "ssim": float(np.nanmean(ssim_list)),
+        "dice": float(np.nanmean(dice_list)),
+        "tre": float(np.nanmean(tre_list)),
+        "hausdorff": float(np.nanmean(hd_list)),
     }
 
 
@@ -145,20 +160,33 @@ class NestedCVRunner:
         for sub in ["search", "theta", "final", "best_model", "plots"]:
             (self.results_dir / sub).mkdir(parents=True, exist_ok=True)
         for sub in ["search", "final", "best_model"]:
-            (config.CHECKPOINT_DIR / "nested_cv" / model_name / sub).mkdir(parents=True, exist_ok=True)
+            (config.CHECKPOINT_DIR / "nested_cv" / model_name / sub).mkdir(
+                parents=True, exist_ok=True
+            )
 
     def preprocess_all(self):
         """Preprocesses every patient once; folds/configs index into this in RAM."""
-        all_subdirs = sorted([d for d in os.listdir(config.DATA_DIR)
-                               if os.path.isdir(os.path.join(config.DATA_DIR, d))])
-        print(f"Preprocessing {len(all_subdirs)} patients once for the whole nested CV run...")
+        all_subdirs = sorted(
+            [
+                d
+                for d in os.listdir(config.DATA_DIR)
+                if os.path.isdir(os.path.join(config.DATA_DIR, d))
+            ]
+        )
+        print(
+            f"Preprocessing {len(all_subdirs)} patients once for the whole nested CV run..."
+        )
         self.ram = preprocess_dataset(config.DATA_DIR, all_subdirs)
 
     # --- search stage (inner CV, hyperparameter ranking) ---
 
     def run_search_unit(self, outer_i, inner_j, cfg_idx, cfg, inner_train, inner_val):
         assert self.ram is not None, "call preprocess_all() before running search units"
-        result_path = self.results_dir / "search" / f"outer{outer_i}_inner{inner_j}_cfg{cfg_idx}.json"
+        result_path = (
+            self.results_dir
+            / "search"
+            / f"outer{outer_i}_inner{inner_j}_cfg{cfg_idx}.json"
+        )
         if result_path.exists():
             return load_json(result_path)["dice"]
 
@@ -171,18 +199,34 @@ class NestedCVRunner:
         model = build_model(self.model_name, self.device)
         ckpt_name = f"nested_cv/{self.model_name}/search/outer{outer_i}_inner{inner_j}_cfg{cfg_idx}.pt"
         _, ckpt_path = train_model(
-            model, train_loader, val_loader, self.device,
-            checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
-            lr=cfg["lr"], lambda_smooth=cfg["lambda_smooth"],
+            model,
+            train_loader,
+            val_loader,
+            self.device,
+            checkpoint_name=ckpt_name,
+            n_epochs=SEARCH_EPOCH_CAP,
+            lr=cfg["lr"],
+            lambda_smooth=cfg["lambda_smooth"],
         )
-        model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
+        model.load_state_dict(
+            torch.load(ckpt_path, map_location=self.device, weights_only=True)
+        )
         model.eval()
 
-        dice = evaluate_dice(model, val_loader, val_data[0], val_data[1], val_data[3], self.device)
-        ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
+        dice = evaluate_dice(
+            model, val_loader, val_data[0], val_data[1], val_data[3], self.device
+        )
+        ckpt_path.unlink(
+            missing_ok=True
+        )  # only the score matters for search-stage runs
 
-        save_json(result_path, {"outer": outer_i, "inner": inner_j, "config": cfg, "dice": dice})
-        print(f"[search] outer{outer_i} inner{inner_j} cfg{cfg_idx} {cfg} -> dice={dice:.4f}")
+        save_json(
+            result_path,
+            {"outer": outer_i, "inner": inner_j, "config": cfg, "dice": dice},
+        )
+        print(
+            f"[search] outer{outer_i} inner{inner_j} cfg{cfg_idx} {cfg} -> dice={dice:.4f}"
+        )
         return dice
 
     def pick_theta(self, outer_i, configs):
@@ -192,20 +236,37 @@ class NestedCVRunner:
 
         avg_dice = []
         for cfg_idx in range(len(configs)):
-            dices = [load_json(self.results_dir / "search" / f"outer{outer_i}_inner{j}_cfg{cfg_idx}.json")["dice"]
-                      for j in range(INNER_K)]
+            dices = [
+                load_json(
+                    self.results_dir
+                    / "search"
+                    / f"outer{outer_i}_inner{j}_cfg{cfg_idx}.json"
+                )["dice"]
+                for j in range(INNER_K)
+            ]
             avg_dice.append(float(np.mean(dices)))
 
         best_idx = int(np.argmax(avg_dice))
         theta = configs[best_idx]
-        save_json(theta_path, {"outer": outer_i, "theta": theta,
-                                "avg_inner_dice": avg_dice[best_idx], "all_avg_dice": avg_dice})
-        print(f"[theta] outer{outer_i} winner: {theta} (avg inner dice={avg_dice[best_idx]:.4f})")
+        save_json(
+            theta_path,
+            {
+                "outer": outer_i,
+                "theta": theta,
+                "avg_inner_dice": avg_dice[best_idx],
+                "all_avg_dice": avg_dice,
+            },
+        )
+        print(
+            f"[theta] outer{outer_i} winner: {theta} (avg inner dice={avg_dice[best_idx]:.4f})"
+        )
         return theta
 
     # --- final refit stage (outer CV, reported metrics) ---
 
-    def run_final_refit(self, outer_i, seed_idx, seed, theta, outer_train_subdirs, outer_test_subdirs):
+    def run_final_refit(
+        self, outer_i, seed_idx, seed, theta, outer_train_subdirs, outer_test_subdirs
+    ):
         assert self.ram is not None, "call preprocess_all() before running final refits"
         result_path = self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}.json"
         if result_path.exists():
@@ -223,21 +284,41 @@ class NestedCVRunner:
 
         set_seed(seed)
         model = build_model(self.model_name, self.device)
-        ckpt_name = f"nested_cv/{self.model_name}/final/outer{outer_i}_seed{seed_idx}.pt"
-        history, ckpt_path = train_model(
-            model, train_loader, val_loader, self.device,
-            checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
-            lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
+        ckpt_name = (
+            f"nested_cv/{self.model_name}/final/outer{outer_i}_seed{seed_idx}.pt"
         )
-        model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
+        history, ckpt_path = train_model(
+            model,
+            train_loader,
+            val_loader,
+            self.device,
+            checkpoint_name=ckpt_name,
+            n_epochs=FINAL_EPOCHS,
+            lr=theta["lr"],
+            lambda_smooth=theta["lambda_smooth"],
+        )
+        model.load_state_dict(
+            torch.load(ckpt_path, map_location=self.device, weights_only=True)
+        )
         model.eval()
 
-        metrics = evaluate_full(model, test_loader, test_data[0], test_data[1], test_data[3], self.device)
-        result = {"outer": outer_i, "seed_idx": seed_idx, "seed": seed, "theta": theta,
-                  "metrics": metrics, "checkpoint": str(ckpt_path)}
+        metrics = evaluate_full(
+            model, test_loader, test_data[0], test_data[1], test_data[3], self.device
+        )
+        result = {
+            "outer": outer_i,
+            "seed_idx": seed_idx,
+            "seed": seed,
+            "theta": theta,
+            "metrics": metrics,
+            "checkpoint": str(ckpt_path),
+        }
 
         save_json(result_path, result)
-        save_json(self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}_history.json", history)
+        save_json(
+            self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}_history.json",
+            history,
+        )
         print(f"[final] outer{outer_i} seed{seed_idx}({seed}) -> {metrics}")
         return result
 
@@ -250,22 +331,35 @@ class NestedCVRunner:
         theta = self.pick_theta(outer_i, configs)
 
         for seed_idx, seed in enumerate(seeds_for(N_SEEDS)):
-            self.run_final_refit(outer_i, seed_idx, seed, theta, fold["outer_train"], fold["outer_test"])
+            self.run_final_refit(
+                outer_i, seed_idx, seed, theta, fold["outer_train"], fold["outer_test"]
+            )
 
     # --- best model (all data, no outer-test involved) ---
 
     def run_best_model(self, folds):
-        assert self.ram is not None, "call preprocess_all() before running the best-model stage"
+        assert self.ram is not None, (
+            "call preprocess_all() before running the best-model stage"
+        )
         result_path = self.results_dir / "best_model" / "summary.json"
         if result_path.exists():
             return load_json(result_path)
 
-        thetas = [load_json(self.results_dir / "theta" / f"outer{i}.json")["theta"] for i in range(OUTER_K)]
+        thetas = [
+            load_json(self.results_dir / "theta" / f"outer{i}.json")["theta"]
+            for i in range(OUTER_K)
+        ]
         theta_final = {
-            "lambda_smooth": _mode_with_tiebreak([t["lambda_smooth"] for t in thetas], default=config.LAMBDA_SMOOTH),
-            "lr": _mode_with_tiebreak([t["lr"] for t in thetas], default=config.LEARNING_RATE),
+            "lambda_smooth": _mode_with_tiebreak(
+                [t["lambda_smooth"] for t in thetas], default=config.LAMBDA_SMOOTH
+            ),
+            "lr": _mode_with_tiebreak(
+                [t["lr"] for t in thetas], default=config.LEARNING_RATE
+            ),
         }
-        print(f"[best_model] theta_final (majority vote across {OUTER_K} outer folds): {theta_final}")
+        print(
+            f"[best_model] theta_final (majority vote across {OUTER_K} outer folds): {theta_final}"
+        )
 
         all_subdirs = folds[0]["outer_train"] + folds[0]["outer_test"]
         full_train, full_val = internal_train_val_split(all_subdirs)
@@ -286,28 +380,55 @@ class NestedCVRunner:
             model = build_model(self.model_name, self.device)
             ckpt_name = f"nested_cv/{self.model_name}/best_model/seed{seed_idx}.pt"
             history, ckpt_path = train_model(
-                model, train_loader, val_loader, self.device,
-                checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
-                lr=theta_final["lr"], lambda_smooth=theta_final["lambda_smooth"],
+                model,
+                train_loader,
+                val_loader,
+                self.device,
+                checkpoint_name=ckpt_name,
+                n_epochs=FINAL_EPOCHS,
+                lr=theta_final["lr"],
+                lambda_smooth=theta_final["lambda_smooth"],
             )
-            model.load_state_dict(torch.load(ckpt_path, map_location=self.device, weights_only=True))
+            model.load_state_dict(
+                torch.load(ckpt_path, map_location=self.device, weights_only=True)
+            )
             model.eval()
-            dice = evaluate_dice(model, val_loader, val_data[0], val_data[1], val_data[3], self.device)
+            dice = evaluate_dice(
+                model, val_loader, val_data[0], val_data[1], val_data[3], self.device
+            )
 
-            cand = {"seed_idx": seed_idx, "seed": seed, "internal_val_dice": dice, "checkpoint": str(ckpt_path)}
+            cand = {
+                "seed_idx": seed_idx,
+                "seed": seed,
+                "internal_val_dice": dice,
+                "checkpoint": str(ckpt_path),
+            }
             save_json(cand_path, cand)
-            save_json(self.results_dir / "best_model" / f"seed{seed_idx}_history.json", history)
+            save_json(
+                self.results_dir / "best_model" / f"seed{seed_idx}_history.json",
+                history,
+            )
             candidates.append(cand)
-            print(f"[best_model] seed{seed_idx}({seed}) -> internal val dice={dice:.4f}")
+            print(
+                f"[best_model] seed{seed_idx}({seed}) -> internal val dice={dice:.4f}"
+            )
 
         best = max(candidates, key=lambda c: c["internal_val_dice"])
-        selected_path = config.CHECKPOINT_DIR / "nested_cv" / self.model_name / "best_model" / "best_model.pt"
+        selected_path = (
+            config.CHECKPOINT_DIR
+            / "nested_cv"
+            / self.model_name
+            / "best_model"
+            / "best_model.pt"
+        )
         shutil.copy2(best["checkpoint"], selected_path)
         best["selected_checkpoint"] = str(selected_path)
 
         result = {"theta_final": theta_final, "candidates": candidates, "chosen": best}
         save_json(result_path, result)
-        print(f"[best_model] chosen seed{best['seed_idx']} -> checkpoint: {selected_path}")
+        print(
+            f"[best_model] chosen seed{best['seed_idx']} -> checkpoint: {selected_path}"
+        )
         return result
 
     # --- reporting ---
@@ -325,7 +446,9 @@ class NestedCVRunner:
         tre = [r["metrics"]["tre"] for r in records]
         hd = [r["metrics"]["hausdorff"] for r in records]
 
-        print(f"\n=== Pooled outer-test metrics ({self.model_name}, n={len(records)}) ===")
+        print(
+            f"\n=== Pooled outer-test metrics ({self.model_name}, n={len(records)}) ==="
+        )
         print(f"Dice: {np.mean(dice):.4f} +/- {np.std(dice):.4f}")
         print(f"TRE (mm): {np.mean(tre):.4f} +/- {np.std(tre):.4f}")
         print(f"Hausdorff (mm): {np.mean(hd):.4f} +/- {np.std(hd):.4f}")
@@ -337,7 +460,9 @@ class NestedCVRunner:
 
     def _violin_plot(self, dice, tre, hd, plots_dir):
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-        for ax, values, title in zip(axes, [dice, tre, hd], ["Dice", "TRE (mm)", "Hausdorff (mm)"]):
+        for ax, values, title in zip(
+            axes, [dice, tre, hd], ["Dice", "TRE (mm)", "Hausdorff (mm)"]
+        ):
             ax.violinplot([values], showmeans=True, showextrema=True)
             ax.set_xticks([1])
             ax.set_xticklabels([self.model_name])
@@ -352,17 +477,34 @@ class NestedCVRunner:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         colors = plt.cm.tab10.colors
         for r in records:
-            history = load_json(self.results_dir / "final" / f"outer{r['outer']}_seed{r['seed_idx']}_history.json")
+            history = load_json(
+                self.results_dir
+                / "final"
+                / f"outer{r['outer']}_seed{r['seed_idx']}_history.json"
+            )
             color = colors[r["outer"] % len(colors)]
             for ax, comp in zip(axes, ["loss", "epe", "smooth"]):
-                ax.plot(history[f"train_{comp}"], color=color, alpha=0.5, linestyle="--", linewidth=0.8)
+                ax.plot(
+                    history[f"train_{comp}"],
+                    color=color,
+                    alpha=0.5,
+                    linestyle="--",
+                    linewidth=0.8,
+                )
                 ax.plot(history[f"val_{comp}"], color=color, alpha=0.8, linewidth=1.2)
         for ax, comp in zip(axes, ["LOSS", "EPE", "SMOOTH"]):
             ax.set_title(comp)
             ax.set_xlabel("epoch")
-        handles = [plt.Line2D([0], [0], color=colors[i % len(colors)], label=f"outer fold {i}")
-                   for i in range(OUTER_K)]
-        fig.legend(handles=handles, loc="upper center", ncol=OUTER_K, bbox_to_anchor=(0.5, 1.08))
+        handles = [
+            plt.Line2D([0], [0], color=colors[i % len(colors)], label=f"outer fold {i}")
+            for i in range(OUTER_K)
+        ]
+        fig.legend(
+            handles=handles,
+            loc="upper center",
+            ncol=OUTER_K,
+            bbox_to_anchor=(0.5, 1.08),
+        )
         plt.tight_layout()
         path = plots_dir / f"final_refit_convergence_{self.model_name}.png"
         plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -381,10 +523,21 @@ class NestedCVRunner:
             seed_label = hf.stem.split("_")[0]
             color = colors[i % len(colors)]
             for ax, comp in zip(axes, ["loss", "epe", "smooth"]):
-                ax.plot(history[f"train_{comp}"], color=color, alpha=0.6, linestyle="--", linewidth=0.8,
-                        label=f"{seed_label} train" if comp == "loss" else None)
-                ax.plot(history[f"val_{comp}"], color=color, alpha=0.9, linewidth=1.2,
-                        label=f"{seed_label} val" if comp == "loss" else None)
+                ax.plot(
+                    history[f"train_{comp}"],
+                    color=color,
+                    alpha=0.6,
+                    linestyle="--",
+                    linewidth=0.8,
+                    label=f"{seed_label} train" if comp == "loss" else None,
+                )
+                ax.plot(
+                    history[f"val_{comp}"],
+                    color=color,
+                    alpha=0.9,
+                    linewidth=1.2,
+                    label=f"{seed_label} val" if comp == "loss" else None,
+                )
         for ax, comp in zip(axes, ["LOSS", "EPE", "SMOOTH"]):
             ax.set_title(comp)
             ax.set_xlabel("epoch")
@@ -399,8 +552,10 @@ class NestedCVRunner:
 def main(args):
     device = get_device()
     print(f"Using device: {device}")
-    print(f"Design: outer_k={OUTER_K} inner_k={INNER_K} grid={len(grid_configs())} "
-          f"search_cap={SEARCH_EPOCH_CAP} seeds={N_SEEDS} final_epochs={FINAL_EPOCHS}")
+    print(
+        f"Design: outer_k={OUTER_K} inner_k={INNER_K} grid={len(grid_configs())} "
+        f"search_cap={SEARCH_EPOCH_CAP} seeds={N_SEEDS} final_epochs={FINAL_EPOCHS}"
+    )
 
     runner = NestedCVRunner(args.model, device)
     folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
@@ -408,7 +563,7 @@ def main(args):
     if not args.plot_only:
         runner.preprocess_all()
         for i, fold in enumerate(folds):
-            print(f"\n{'='*60}\n Outer fold {i+1}/{OUTER_K}\n{'='*60}")
+            print(f"\n{'=' * 60}\n Outer fold {i + 1}/{OUTER_K}\n{'=' * 60}")
             runner.run_outer_fold(i, fold)
         runner.run_best_model(folds)
 
@@ -417,7 +572,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, choices=["voxelmorph", "transmorph"], required=True)
-    parser.add_argument("--plot-only", action="store_true",
-                         help="Skip training, only aggregate + plot already-persisted results")
+    parser.add_argument(
+        "--model", type=str, choices=["voxelmorph", "transmorph"], required=True
+    )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Skip training, only aggregate + plot already-persisted results",
+    )
     main(parser.parse_args())

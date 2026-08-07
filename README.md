@@ -6,8 +6,8 @@ MR-guided radiotherapy. Given a **fixed** frame (reference) and a **moving** fra
 displacement vector field (DVF) that warps one onto the other, so that anatomy
 (and the tumor) can be tracked frame to frame.
 
-Two learning-based registration models are trained and compared against each
-other and against a classical (non-learning) baseline:
+Two learning-based registration models and a classical baseline are trained/run
+and compared against each other:
 
 - **VoxelMorph** (Balakrishnan et al.), diffeomorphic variant, via the
   [`voxelmorph`](https://github.com/voxelmorph/voxelmorph) package.
@@ -20,26 +20,35 @@ other and against a classical (non-learning) baseline:
   diffeomorphic integration (`VecInt`) and warping (`SpatialTransformer`) so
   both models share the same coordinate conventions and training/eval code
   paths (`model(source, target, registration=True) -> (moved, pos_flow)`).
-- **Classical registration** (`src/classical_registration.py`) — intended as a
-  non-deep-learning baseline. **Not implemented yet** — currently just a stub.
+- **Classical registration** (`src/classical_registration.py`) — a SimpleITK
+  B-Spline baseline (mutual-information-driven, multi-resolution), with no
+  learned parameters.
 
-Both DL models are trained with direct supervision against ground-truth DVFs
-(Charbonnier EPE loss + smoothness regularization; TransMorph-diff additionally
-adds a KL term for its probabilistic head), and are evaluated with the same
-metrics so results are directly comparable: EPE, % negative Jacobian (folding),
-SSIM, and tumor-segmentation-based Dice / TRE / Hausdorff distance.
+VoxelMorph and TransMorph-diff are trained with direct supervision against
+ground-truth DVFs (Charbonnier EPE loss + smoothness regularization;
+TransMorph-diff additionally adds a KL term for its probabilistic head). All
+three methods are evaluated with the same metrics so results are directly
+comparable: EPE (mm), % negative Jacobian (folding), SSIM, and
+tumor-segmentation-based Dice / TRE (mm) / Hausdorff distance (mm) - all
+physical-unit metrics go through the case's real spacing/origin/direction
+(`EvaluationMetric._physical_points` / `_pixel_vector_to_physical` in
+`src/evaluate.py`), not just a bare spacing multiply.
+
+VoxelMorph and TransMorph are trained and evaluated with **nested
+cross-validation** (outer/inner `StratifiedKFold` over patients, hyperparameter
+search in the inner loop, pooled outer-test metrics as the headline result).
 
 ## Status
 
 - [x] Data preprocessing (load `.mha`, normalize, mask, pad, patch)
-- [x] Patient-level train/val/test split (stratified by cohort, no patient leakage)
+- [x] Nested cross-validation (outer/inner `StratifiedKFold`, patient-level, stratified by cohort, no leakage)
 - [x] VoxelMorph training/eval pipeline
 - [x] TransMorph-diff (custom 2D probabilistic model)
-- [x] Metrics: EPE, % negative Jacobian, SSIM, Dice, TRE, Hausdorff
-- [x] Multi-seed training + re-evaluation tooling
-- [x] External-image inference (outside the training dataset)
-- [x] Qualitative comparison figures (VoxelMorph vs TransMorph vs GT)
-- [ ] Classical (non-DL) registration baseline — stubbed, not implemented
+- [x] Classical (non-DL) B-Spline registration baseline
+- [x] Metrics: EPE (mm), % negative Jacobian, SSIM, Dice, TRE (mm), Hausdorff (mm)
+- [x] Per-architecture best-model selection (majority-vote hyperparameters + best seed)
+- [x] Qualitative comparison figures (VoxelMorph vs TransMorph vs Classical vs GT)
+- [x] Cross-method quantitative results table + combined comparison plot
 
 ## Project structure
 
@@ -49,21 +58,21 @@ mri-alignment/
 ├── src/
 │   ├── compat.py                 # Python 3.11+ compatibility shim, must be imported before voxelmorph/neurite
 │   ├── preprocessing.py          # .mha loading, z-score normalization, anatomy mask, padding, patch extraction
-│   ├── dataset.py                # Patient split (train/val/test) + PyTorch Dataset (patches from full images)
+│   ├── dataset.py                # Patient split (split_patients, cv_splits) + PyTorch Dataset (patches from full images)
 │   ├── models.py                 # Model factory (build_model) for voxelmorph / transmorph
 │   ├── transmorph.py             # TransMorph-diff: custom 2D probabilistic registration model
-│   ├── classical_registration.py # Classical (non-DL) baseline — WIP, not implemented
+│   ├── classical_registration.py # Classical SimpleITK B-Spline baseline (file-path and array-based entry points)
 │   ├── losses.py                 # Charbonnier EPE + smoothness loss
 │   ├── train.py                  # Training loop (early stopping, LR scheduling) + inference benchmark
-│   ├── evaluate.py               # Patch reconstruction + EPE/Jacobian/SSIM/Dice/TRE/Hausdorff metrics
+│   ├── evaluate.py               # Patch reconstruction + EPE/Jacobian/SSIM/Dice/TRE/Hausdorff metrics (mm-aware)
 │   ├── visualize.py              # Qualitative plots: patches, reconstructed fixed/moving/warped/DVF
 │   └── io_utils.py                # External-image inference: read/write .mha, pad/crop, denormalize
 ├── scripts/
-│   ├── train_multi_seed.py           # Train a model across N random seeds, report averaged metrics
-│   ├── evaluate_model.py             # Evaluate one checkpoint on the test split
-│   ├── reevaluate_checkpoints.py     # Re-run metrics on already-trained checkpoints (e.g. after adding a metric)
-│   ├── infer_new_images.py           # Run a trained model on a new fixed/moving pair outside the dataset
-│   └── generate_comparison_figure.py # Side-by-side VoxelMorph vs TransMorph qualitative comparison figure
+│   ├── nested_cv.py                    # Nested CV + hyperparameter search + best-model selection, per architecture
+│   ├── evaluate_checkpoints.py         # Re-run metrics on already-trained checkpoints (e.g. after a metric change)
+│   ├── evaluate_classical_registration.py # Evaluate the classical baseline with the same metrics as the DL models
+│   ├── build_results_table.py          # Combine all three methods into one CSV + comparison plot + significance test
+│   └── generate_comparison_figure.py   # Side-by-side VoxelMorph vs TransMorph vs Classical qualitative comparison figure
 ├── notebooks/
 │   └── exploracion.ipynb         # Exploratory analysis / scratch notebook
 ├── checkpoints/                  # Saved model weights (git-ignored, kept via .gitkeep)
@@ -88,9 +97,12 @@ data/TrackRad/
         └── seg_XXX.mha        # tumor segmentation for each moving frame
 ```
 
-Patients are split into train/val/test (`src/dataset.py::split_patients`),
-stratified by cohort letter, so all frames from the same patient always stay
-in the same split.
+Patients are split at the patient level, stratified by cohort letter, so all
+frames from the same patient always stay together. Two split strategies exist
+in `src/dataset.py`:
+- `cv_splits()` — nested outer/inner `StratifiedKFold`, used by `nested_cv.py`.
+- `split_patients()` — a single fixed train/val/test split, kept for any
+  standalone use outside the nested CV pipeline.
 
 By default the dataset lives at `./data/TrackRad`, checkpoints at
 `./checkpoints`, and outputs (figures, csv, exports) at `./outputs`. All three
@@ -113,19 +125,23 @@ uv sync
 ## Usage
 
 ```bash
-# Train VoxelMorph or TransMorph across several random seeds
-uv run python scripts/train_multi_seed.py --model voxelmorph --master-seed 0 --n-runs 5
+# Run the full nested CV + hyperparameter search + best-model selection for one architecture
+uv run python scripts/nested_cv.py --model voxelmorph
+uv run python scripts/nested_cv.py --model transmorph
 
-# Evaluate a single checkpoint on the test split (metrics + inference benchmark)
-uv run python scripts/evaluate_model.py --model voxelmorph --checkpoint best_voxelmorph.pt
+# Re-aggregate + re-plot an in-progress or finished run without training anything
+uv run python scripts/nested_cv.py --model voxelmorph --plot-only
 
-# Re-run metrics on checkpoints already trained (e.g. after adding a new metric)
-uv run python scripts/reevaluate_checkpoints.py --model voxelmorph --seeds 8506 6369 5111 2697 3078
+# Re-run metrics on checkpoints already trained (e.g. after changing EvaluationMetric)
+uv run python scripts/evaluate_checkpoints.py --model voxelmorph
 
-# Run a trained model on a new fixed/moving pair outside the training dataset
-uv run python scripts/infer_new_images.py --fixed path/to/fixed.mha --moving path/to/moving.mha --model voxelmorph
+# Evaluate the classical B-Spline baseline on the full dataset with the same metrics
+uv run python scripts/evaluate_classical_registration.py
 
-# Generate a qualitative VoxelMorph vs TransMorph comparison figure for specific cases
+# Build one combined results table + comparison plot + significance test across all three methods
+uv run python scripts/build_results_table.py
+
+# Generate a qualitative VoxelMorph vs TransMorph vs Classical comparison figure for specific cases
 uv run python scripts/generate_comparison_figure.py --cases A_024:095 B_021:017
 ```
 
@@ -137,4 +153,6 @@ ratios, VoxelMorph architecture parameters, training hyperparameters — batch
 size, learning rate, epochs, early-stopping patience, LR scheduler — and loss
 weights). Edit it directly, or override the three data/output paths via the
 `MRI_DATA_DIR` / `MRI_CHECKPOINT_DIR` / `MRI_OUTPUTS_DIR` environment
-variables described above.
+variables described above. The nested CV pipeline's own design constants
+(`OUTER_K`, `INNER_K`, the hyperparameter grid, epoch budgets, seed count) live
+at the top of `scripts/nested_cv.py`, not in `config.py`.

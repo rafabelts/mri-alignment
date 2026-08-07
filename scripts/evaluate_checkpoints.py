@@ -1,15 +1,17 @@
 """
-Re-evaluates already-trained checkpoints from nested_cv.py with the current
-EvaluationMetric code, without retraining.
+Evaluates already-trained checkpoints from nested_cv.py with the current
+EvaluationMetric code, without retraining. nested_cv.py's own run only ever
+saves fold-level mean metrics - this is what actually produces per-case
+CSVs and boxplots, and can be re-run any time metric code changes.
 
 For each of the OUTER_K folds, evaluates that fold's N_SEEDS checkpoints
 against that fold's own outer-test patients, overwrites the corresponding
 metrics under outputs/nested_cv/<model>/final/, saves a boxplot and a
-per-case CSV per checkpoint under outputs/nested_cv/<model>/reevaluation/,
+per-case CSV per checkpoint under outputs/nested_cv/<model>/evaluation/,
 runs a computational-cost benchmark, and regenerates the pooled plots.
 
 Usage:
-    uv run python scripts/reevaluate_checkpoints.py --model voxelmorph
+    uv run python scripts/evaluate_checkpoints.py --model voxelmorph
 """
 
 import argparse
@@ -49,7 +51,7 @@ def main(model_name):
     runner.preprocess_all()
     folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
 
-    reeval_dir = runner.results_dir / "reevaluation"
+    reeval_dir = runner.results_dir / "evaluation"
     (reeval_dir / "boxplots").mkdir(parents=True, exist_ok=True)
     (reeval_dir / "per_case").mkdir(parents=True, exist_ok=True)
 
@@ -88,7 +90,7 @@ def main(model_name):
             eval_metrics = EvaluationMetric(
                 test_results, ram_fixed_te, ram_moving_te, meta_lookup_te
             )
-            epe_list, jac_list, ssim_list = eval_metrics.evaluate_reconstructed()
+            epe_list, jac_list, ssim_list = eval_metrics.evaluate_reconstructed(ram_meta_te)
             dice_list, tre_list, hd_list = eval_metrics.evaluate_segmentation(
                 ram_meta_te
             )

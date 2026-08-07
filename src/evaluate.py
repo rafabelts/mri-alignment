@@ -123,11 +123,12 @@ class EvaluationMetric:
 
         return ssim(img_moving_np, warped, data_range=data_range)
 
-    def evaluate_reconstructed(self):
+    def evaluate_reconstructed(self, ram_meta):
         """
-        Computes EPE (against GT DVF, masked to anatomy), % negative Jacobian,
-        and SSIM for every case in `self.results`, printing the mean ± std
-        across cases and storing per-case values in `self.per_case_reconstructed`.
+        Computes EPE (mm, against GT DVF, masked to anatomy), % negative
+        Jacobian, and SSIM for every case in `self.results`, printing the
+        mean ± std across cases and storing per-case values in
+        `self.per_case_reconstructed`.
 
         Returns
         -------
@@ -137,10 +138,15 @@ class EvaluationMetric:
         self.per_case_reconstructed = {}
 
         for key, r in self.results.items():
-            pred_dvf, gt_dvf, mask = r["pred_dvf"], r["gt_dvf"], r["anatomy_mask"]
+            idx = self.meta_lookup.get(key)
+            if idx is None:
+                continue
 
-            diff = pred_dvf - gt_dvf
-            epe_map = np.sqrt((diff ** 2).sum(axis=-1))
+            pred_dvf, gt_dvf, mask = r["pred_dvf"], r["gt_dvf"], r["anatomy_mask"]
+            spatial_meta = ram_meta[idx]["spatial_meta"]
+
+            diff_mm = self._pixel_vector_to_physical(pred_dvf - gt_dvf, spatial_meta)
+            epe_map = np.linalg.norm(diff_mm, axis=-1)
             epe_val = epe_map[mask].mean() if mask.sum() > 0 else np.nan
             if mask.sum() > 0:
                 epe_list.append(epe_val)
@@ -155,11 +161,30 @@ class EvaluationMetric:
 
             self.per_case_reconstructed[key] = {"epe": epe_val, "jacobian": jac_val, "ssim": ssim_val}
 
-        print(f"EPE average (reconstructed): {np.mean(epe_list):.4f} ± {np.std(epe_list):.4f}")
+        print(f"EPE average (mm): {np.mean(epe_list):.4f} ± {np.std(epe_list):.4f}")
         print(f"% negative jacobian (reconstructed): {np.mean(pct_neg_jac_list):.4f} ± {np.std(pct_neg_jac_list):.4f}")
         print(f"SSIM (moving vs warped): {np.mean(ssim_list):.4f} ± {np.std(ssim_list):.4f}")
 
         return epe_list, pct_neg_jac_list, ssim_list
+
+    @staticmethod
+    def _pixel_vector_to_physical(diff, spatial_meta):
+        """
+        Converts a (H, W, 2) field of (dx, dy) pixel-space displacement
+        DIFFERENCES into physical (mm) vectors, via the direction/spacing
+        linear map. Unlike `_physical_points`, this has no origin term - a
+        vector difference has no absolute position for origin to apply to,
+        it cancels out exactly like it does between two transformed points.
+        """
+        direction = np.array(spatial_meta["direction"]).reshape(3, 3)
+        spacing = np.array(spatial_meta["spacing"])
+
+        h, w = diff.shape[:2]
+        vec_index = np.zeros((h, w, 3))
+        vec_index[..., 0] = diff[..., 0]  # dx, index axis 0
+        vec_index[..., 1] = diff[..., 1]  # dy, index axis 1
+
+        return (vec_index * spacing) @ direction.T
 
     def evaluate_segmentation(self, ram_meta):
         """

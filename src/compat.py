@@ -3,12 +3,12 @@ Compatibility with the 'voxelmorph' library (v0.2), which was written for a vers
 3.11 and uses 'inspect.getargspec', that was removed from Python 3.11+
 
 
-IMPORTANT: This module must be imported BEFORE `voxelmorph`/`neurite` in any file that uses them, since 
+IMPORTANT: This module must be imported BEFORE `voxelmorph`/`neurite` in any file that uses them, since
 environment variables only take effect if they are defined before the import.
 """
 
-import os
 import inspect
+import os
 from collections import namedtuple
 
 # vxm/neurite supports a pythorch or tensorflow backend, here we use pytorch.
