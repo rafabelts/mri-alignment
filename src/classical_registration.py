@@ -132,6 +132,14 @@ class ClassicalBRegistration:
         comparable to the deep-learning models' predicted DVFs (both are then
         used the same way by EvaluationMetric/map_coordinates).
 
+        SimpleITK's Execute(fixed, moving) returns a transform T used to pull
+        moving into fixed's frame (moving(x + D(x)) ~ fixed(x)), the opposite
+        direction from this codebase's pred_dvf convention
+        (fixed(x + pred_dvf(x)) ~ moving(x), matching gt_dvf/the DL models) -
+        negated below to match. Verified empirically: warping fixed with the
+        negated field reduces MSE against moving below the no-registration
+        baseline; the un-negated field made it worse than no registration.
+
         Returns
         -------
         pred_dvf : np.ndarray (H, W, 2)
@@ -149,7 +157,7 @@ class ClassicalBRegistration:
         dvf_filter.SetReferenceImage(fixed_2d)
         dvf_2d = dvf_filter.Execute(out_tx)
 
-        return sitk.GetArrayFromImage(dvf_2d)
+        return -sitk.GetArrayFromImage(dvf_2d)
 
     def run(self, fixed_path, moving_path, output_tx_path=None, output_dvf_path=None):
         """High-level pipeline: loads images, registers 2D slices, and outputs the DVF"""
