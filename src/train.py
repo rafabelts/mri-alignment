@@ -20,7 +20,7 @@ def train_model(model, train_loader, val_loader, device,
                  n_epochs=N_EPOCHS, lr=LEARNING_RATE, patience=PATIENCE,
                  lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH, lambda_kl=LAMBDA_KL,
                  scheduler_factor=SCHEDULER_FACTOR, scheduler_patience=SCHEDULER_PATIENCE,
-                 grad_clip_max_norm=GRAD_CLIP_MAX_NORM, epoch_callback=None):
+                 grad_clip_max_norm=GRAD_CLIP_MAX_NORM, epoch_callback=None, log_prefix=""):
     """
     Trains 'model' with direct supervision (EPE + smoothness) against the
     real DVF, with early stopping and LR reduction in plateau.
@@ -29,6 +29,12 @@ def train_model(model, train_loader, val_loader, device,
     epoch (e.g. for Optuna pruning) - raising from it stops training
     immediately, propagating out of this function as-is. Keeps this module
     unaware of what the callback actually does or raises.
+
+    `log_prefix` is prepended to every printed line - since multiple calls
+    to this function can run concurrently in different threads (e.g. Optuna
+    trials on different GPUs), their epoch logs interleave in the shared
+    console otherwise, and look like duplicated epochs instead of separate
+    runs.
 
     Returns
     -------
@@ -70,21 +76,21 @@ def train_model(model, train_loader, val_loader, device,
         if epoch_callback is not None:
             epoch_callback(epoch, val_metrics)
 
-        print(f"Epoch {epoch + 1}/{n_epochs} ({epoch_time:.1f}s)")
-        print(f"  train -> loss: {train_metrics['loss']:.4f} | epe: {train_metrics['epe']:.4f} "
+        print(f"{log_prefix}Epoch {epoch + 1}/{n_epochs} ({epoch_time:.1f}s)")
+        print(f"{log_prefix}  train -> loss: {train_metrics['loss']:.4f} | epe: {train_metrics['epe']:.4f} "
               f"| smooth: {train_metrics['smooth']:.4f}")
-        print(f"  val   -> loss: {val_metrics['loss']:.4f} | epe: {val_metrics['epe']:.4f} "
+        print(f"{log_prefix}  val   -> loss: {val_metrics['loss']:.4f} | epe: {val_metrics['epe']:.4f} "
               f"| smooth: {val_metrics['smooth']:.4f}")
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             patience_counter = 0
             torch.save(model.state_dict(), checkpoint_path)
-            print(f"  -> best model (val_loss={val_metrics['loss']:.4f})")
+            print(f"{log_prefix}  -> best model (val_loss={val_metrics['loss']:.4f})")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"  -> early stopping (patience={patience})")
+                print(f"{log_prefix}  -> early stopping (patience={patience})")
                 break
 
     return history, checkpoint_path

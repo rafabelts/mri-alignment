@@ -283,6 +283,7 @@ class NestedCVRunner:
                 lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
                 lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
                 epoch_callback=prune_callback,
+                log_prefix=f"[outer{outer_i} trial{trial.number} inner{j} {device}] ",
             )
             model.load_state_dict(
                 torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -364,6 +365,7 @@ class NestedCVRunner:
             checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
             lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
             lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
+            log_prefix=f"[final outer{outer_i} seed{seed_idx}] ",
         )
         model.load_state_dict(
             torch.load(ckpt_path, map_location=self.device, weights_only=True)
@@ -457,6 +459,7 @@ class NestedCVRunner:
                 checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
                 lr=theta_final["lr"], lambda_smooth=theta_final["lambda_smooth"],
                 lambda_kl=theta_final.get("lambda_kl", config.LAMBDA_KL),
+                log_prefix=f"[best_model seed{seed_idx}] ",
             )
             model.load_state_dict(
                 torch.load(ckpt_path, map_location=self.device, weights_only=True)
