@@ -27,6 +27,7 @@ Usage:
 import argparse
 import json
 import os
+import queue
 import shutil
 import sys
 from collections import Counter
@@ -217,6 +218,17 @@ class NestedCVRunner:
         self.model_name = model_name
         self.devices = devices
         self.device = devices[0]
+        # a thread-safe pool, not a round-robin index: with n_jobs>1, Optuna
+        # hands the next trial to whichever worker thread frees up first, and
+        # trials finish at very different speeds (pruned trials are much
+        # faster than full ones) - so trial numbers reach workers out of
+        # order, and `trial.number % len(devices)` can hand two concurrent
+        # trials the same GPU while another sits idle. Acquiring/releasing
+        # from this queue instead ties the device strictly to "currently free",
+        # never to trial number.
+        self._device_pool = queue.Queue()
+        for d in devices:
+            self._device_pool.put(d)
         self.results_dir = config.OUTPUTS_DIR / "nested_cv" / model_name
         self.ram = None
 
@@ -245,56 +257,59 @@ class NestedCVRunner:
 
     def _search_objective(self, trial, outer_i, fold):
         assert self.ram is not None, "call preprocess_all() before running search trials"
-        # one device per trial, round-robin by trial number - lets concurrent
-        # threads (n_jobs=len(devices) in run_search_stage) each use a
-        # different GPU while sharing the same preprocessed dataset in RAM
-        device = self.devices[trial.number % len(self.devices)]
         theta = suggest_theta(trial, self.model_name)
 
-        dice_scores = []
-        for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
-            train_data = subset_by_patients(*self.ram, inner_train)
-            val_data = subset_by_patients(*self.ram, inner_val)
-            train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
-            val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
+        # blocks until a GPU is free - guarantees at most len(devices) trials
+        # ever run at once, one per device, regardless of how unevenly they
+        # finish (pruned trials free their device much sooner than full ones)
+        device = self._device_pool.get()
+        try:
+            dice_scores = []
+            for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
+                train_data = subset_by_patients(*self.ram, inner_train)
+                val_data = subset_by_patients(*self.ram, inner_val)
+                train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
+                val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
 
-            # set_seed() reseeds torch's global RNG, which is shared across
-            # threads - under concurrent search trials this means model init
-            # isn't perfectly reproducible relative to other in-flight trials.
-            # Acceptable here: search-stage only needs relative ranking
-            # between configs, not bit-exact reproducibility (unlike the
-            # final-refit/best-model seeds, which stay single-threaded).
-            set_seed(SEARCH_SEED)
-            model = build_model(self.model_name, device, int_steps=theta["vxm_int_steps"])
+                # set_seed() reseeds torch's global RNG, which is shared across
+                # threads - under concurrent search trials this means model init
+                # isn't perfectly reproducible relative to other in-flight trials.
+                # Acceptable here: search-stage only needs relative ranking
+                # between configs, not bit-exact reproducibility (unlike the
+                # final-refit/best-model seeds, which stay single-threaded).
+                set_seed(SEARCH_SEED)
+                model = build_model(self.model_name, device, int_steps=theta["vxm_int_steps"])
 
-            def prune_callback(epoch, val_metrics, inner_j=j):
-                if inner_j == 0:
-                    trial.report(-val_metrics["loss"], step=epoch)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned()
+                def prune_callback(epoch, val_metrics, inner_j=j):
+                    if inner_j == 0:
+                        trial.report(-val_metrics["loss"], step=epoch)
+                        if trial.should_prune():
+                            raise optuna.TrialPruned()
 
-            ckpt_name = (
-                f"nested_cv/{self.model_name}/search/"
-                f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
-            )
-            _, ckpt_path = train_model(
-                model, train_loader, val_loader, device,
-                checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
-                lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
-                lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
-                epoch_callback=prune_callback,
-                log_prefix=f"[outer{outer_i} trial{trial.number} inner{j} {device}] ",
-            )
-            model.load_state_dict(
-                torch.load(ckpt_path, map_location=device, weights_only=True)
-            )
-            model.eval()
+                ckpt_name = (
+                    f"nested_cv/{self.model_name}/search/"
+                    f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
+                )
+                _, ckpt_path = train_model(
+                    model, train_loader, val_loader, device,
+                    checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
+                    lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
+                    lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
+                    epoch_callback=prune_callback,
+                    log_prefix=f"[outer{outer_i} trial{trial.number} inner{j} {device}] ",
+                )
+                model.load_state_dict(
+                    torch.load(ckpt_path, map_location=device, weights_only=True)
+                )
+                model.eval()
 
-            dice = evaluate_dice(
-                model, val_loader, val_data[0], val_data[1], val_data[3], device
-            )
-            ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
-            dice_scores.append(dice)
+                dice = evaluate_dice(
+                    model, val_loader, val_data[0], val_data[1], val_data[3], device
+                )
+                ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
+                dice_scores.append(dice)
+        finally:
+            self._device_pool.put(device)
 
         mean_dice = float(np.mean(dice_scores))
         print(
