@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     # transmorph, on purpose - also exercises the lambda_kl search dimension,
     # which voxelmorph doesn't have
-    args = argparse.Namespace(model="transmorph", plot_only=False, device=None)
+    args = argparse.Namespace(model="transmorph", plot_only=False, devices=None)
 
     try:
         ncv.main(args)

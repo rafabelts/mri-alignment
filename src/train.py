@@ -145,6 +145,11 @@ def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=
     """
     model.eval()
 
+    # "cuda", "cuda:0", "cuda:1", etc. all count as CUDA - a plain "== cuda"
+    # check would silently skip synchronization/memory tracking (and always
+    # report peak_memory_mb=None) for any indexed device string
+    is_cuda = torch.device(device).type == "cuda"
+
     n_params = sum(p.numel() for p in model.parameters())
     n_params_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -152,24 +157,24 @@ def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=
         for _ in range(n_warmup):
             model(sample_fixed, sample_moving, registration=True)
 
-    if device == "cuda":
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
+    if is_cuda:
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
 
     times = []
     with torch.no_grad():
         for _ in range(n_runs):
-            if device == "cuda":
-                torch.cuda.synchronize()
+            if is_cuda:
+                torch.cuda.synchronize(device)
             start = time.perf_counter()
             model(sample_fixed, sample_moving, registration=True)
-            if device == "cuda":
-                torch.cuda.synchronize()
+            if is_cuda:
+                torch.cuda.synchronize(device)
             times.append(time.perf_counter() - start)
 
     times = np.array(times) * 1000  # ms
 
-    peak_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2) if device == "cuda" else None
+    peak_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2) if is_cuda else None
 
     results = {
         "n_params": n_params,

@@ -21,7 +21,7 @@ Usage:
     uv run python scripts/nested_cv.py --model voxelmorph
     uv run python scripts/nested_cv.py --model transmorph
     uv run python scripts/nested_cv.py --model voxelmorph --plot-only
-    uv run python scripts/nested_cv.py --model voxelmorph --device cuda:0   # + a second process with --device cuda:1
+    uv run python scripts/nested_cv.py --model voxelmorph --devices cuda:0,cuda:1  # search stage splits trials across both
 """
 
 import argparse
@@ -47,7 +47,7 @@ from src.dataset import MRICineDataset, build_lookup, cv_splits
 from src.evaluate import EvaluationMetric, inference_with_reconstruction
 from src.models import build_model
 from src.preprocessing import preprocess_dataset
-from src.train import train_model
+from src.train import benchmark_model, train_model
 from src.utils import get_device, set_seed
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -208,9 +208,15 @@ def aggregate_theta(thetas, model_name):
 
 
 class NestedCVRunner:
-    def __init__(self, model_name, device):
+    def __init__(self, model_name, devices):
+        """`devices`: list of device strings, e.g. ["cuda:0", "cuda:1"] or
+        ["cpu"]. The search stage runs one trial per device concurrently
+        (in-process threads sharing the same preprocessed dataset - no RAM
+        duplication). Every other stage (final refit, best-model) is
+        sequential on devices[0]."""
         self.model_name = model_name
-        self.device = device
+        self.devices = devices
+        self.device = devices[0]
         self.results_dir = config.OUTPUTS_DIR / "nested_cv" / model_name
         self.ram = None
 
@@ -239,6 +245,10 @@ class NestedCVRunner:
 
     def _search_objective(self, trial, outer_i, fold):
         assert self.ram is not None, "call preprocess_all() before running search trials"
+        # one device per trial, round-robin by trial number - lets concurrent
+        # threads (n_jobs=len(devices) in run_search_stage) each use a
+        # different GPU while sharing the same preprocessed dataset in RAM
+        device = self.devices[trial.number % len(self.devices)]
         theta = suggest_theta(trial, self.model_name)
 
         dice_scores = []
@@ -248,8 +258,14 @@ class NestedCVRunner:
             train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
             val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
 
+            # set_seed() reseeds torch's global RNG, which is shared across
+            # threads - under concurrent search trials this means model init
+            # isn't perfectly reproducible relative to other in-flight trials.
+            # Acceptable here: search-stage only needs relative ranking
+            # between configs, not bit-exact reproducibility (unlike the
+            # final-refit/best-model seeds, which stay single-threaded).
             set_seed(SEARCH_SEED)
-            model = build_model(self.model_name, self.device, int_steps=theta["vxm_int_steps"])
+            model = build_model(self.model_name, device, int_steps=theta["vxm_int_steps"])
 
             def prune_callback(epoch, val_metrics, inner_j=j):
                 if inner_j == 0:
@@ -262,26 +278,26 @@ class NestedCVRunner:
                 f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
             )
             _, ckpt_path = train_model(
-                model, train_loader, val_loader, self.device,
+                model, train_loader, val_loader, device,
                 checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
                 lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
                 lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
                 epoch_callback=prune_callback,
             )
             model.load_state_dict(
-                torch.load(ckpt_path, map_location=self.device, weights_only=True)
+                torch.load(ckpt_path, map_location=device, weights_only=True)
             )
             model.eval()
 
             dice = evaluate_dice(
-                model, val_loader, val_data[0], val_data[1], val_data[3], self.device
+                model, val_loader, val_data[0], val_data[1], val_data[3], device
             )
             ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
             dice_scores.append(dice)
 
         mean_dice = float(np.mean(dice_scores))
         print(
-            f"[search] outer{outer_i} trial{trial.number} {theta} "
+            f"[search] outer{outer_i} trial{trial.number} (device={device}) {theta} "
             f"-> dice={mean_dice:.4f} ({len(dice_scores)}/{INNER_K} inner folds ran)"
         )
         return mean_dice
@@ -303,7 +319,8 @@ class NestedCVRunner:
         remaining = TRIAL_BUDGET - len(study.trials)
         if remaining > 0:
             study.optimize(
-                lambda trial: self._search_objective(trial, outer_i, fold), n_trials=remaining
+                lambda trial: self._search_objective(trial, outer_i, fold),
+                n_trials=remaining, n_jobs=len(self.devices),
             )
 
         theta = study.best_params
@@ -356,12 +373,24 @@ class NestedCVRunner:
         metrics, metric = evaluate_full(
             model, test_loader, test_data[0], test_data[1], test_data[3], self.device
         )
+
+        # compute cost is architecture-dependent, not case-dependent (unlike
+        # `metrics`), so it's measured once per refit here rather than per
+        # row in the per-case CSV - but it DOES depend on this fold's own
+        # theta (batch_size, vxm_int_steps can differ per outer fold), so
+        # it's not redundant to measure it again for each one
+        sample_fixed, sample_moving, _, _ = next(iter(test_loader))
+        sample_fixed = sample_fixed[:1].to(self.device).float()
+        sample_moving = sample_moving[:1].to(self.device).float()
+        benchmark = benchmark_model(model, sample_fixed, sample_moving, device=self.device)
+
         result = {
             "outer": outer_i,
             "seed_idx": seed_idx,
             "seed": seed,
             "theta": theta,
             "metrics": metrics,
+            "benchmark": benchmark,
             "checkpoint": str(ckpt_path),
         }
 
@@ -590,14 +619,14 @@ class NestedCVRunner:
 
 
 def main(args):
-    device = args.device or get_device()
-    print(f"Using device: {device}")
+    devices = args.devices.split(",") if args.devices else [get_device()]
+    print(f"Using device(s): {devices}")
     print(
         f"Design: outer_k={OUTER_K} inner_k={INNER_K} trial_budget={TRIAL_BUDGET} "
         f"search_cap={SEARCH_EPOCH_CAP} seeds={N_SEEDS} final_epochs={FINAL_EPOCHS}"
     )
 
-    runner = NestedCVRunner(args.model, device)
+    runner = NestedCVRunner(args.model, devices)
     folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
 
     if not args.plot_only:
@@ -621,11 +650,12 @@ if __name__ == "__main__":
         help="Skip training, only aggregate + plot already-persisted results",
     )
     parser.add_argument(
-        "--device",
+        "--devices",
         type=str,
         default=None,
-        help="e.g. cuda:0, cuda:1, cpu - defaults to the auto-detected device. "
-             "Run two processes with different values for dual-GPU parallel search "
-             "(both hit the same Optuna storage, so trials are naturally split).",
+        help="Comma-separated, e.g. 'cuda:0,cuda:1' or 'cpu' - defaults to a single "
+             "auto-detected device. With more than one, the search stage runs one "
+             "trial per device concurrently (in-process threads, one shared "
+             "preprocessed dataset - no extra RAM cost per device).",
     )
     main(parser.parse_args())
