@@ -79,7 +79,7 @@ def main():
             "reg_time_s": reg_times.get(key),
         })
     per_case_path = out_dir / "per_case.csv"
-    pd.DataFrame(per_case_rows).to_csv(per_case_path, index=False)
+    pd.DataFrame(per_case_rows).to_csv(per_case_path, index=False, float_format="%.3f")
     print(f"Per-case CSV saved: {per_case_path}")
 
     reg_time_ms = np.array(list(reg_times.values())) * 1000

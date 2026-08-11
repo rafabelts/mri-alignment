@@ -7,7 +7,7 @@ import voxelmorph as vxm
 
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
-def build_model(model_name, device, inshape=None):
+def build_model(model_name, device, inshape=None, int_steps=None):
     """
     Factory for the two registration architectures used in this project.
 
@@ -20,15 +20,25 @@ def build_model(model_name, device, inshape=None):
     inshape : tuple[int, int], optional
         Overrides the default (256, 256) input shape (e.g. to run inference
         on full-size external images padded to a different resolution).
+    int_steps : int, optional
+        Overrides the default diffeomorphic integration step count (both
+        architectures reuse VoxelMorph's VecInt) - e.g. for hyperparameter
+        search over this value.
 
     Returns
     -------
     torch.nn.Module
     """
+    kwargs = {}
+    if inshape:
+        kwargs["inshape"] = inshape
+    if int_steps is not None:
+        kwargs["int_steps"] = int_steps
+
     if model_name == 'voxelmorph':
-        return _build_voxelmorph(device, inshape=inshape) if inshape else _build_voxelmorph(device)
+        return _build_voxelmorph(device, **kwargs)
     elif model_name == 'transmorph':
-        return _build_transmorph(device, inshape=inshape) if inshape else _build_transmorph(device)
+        return _build_transmorph(device, **kwargs)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 

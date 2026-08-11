@@ -147,7 +147,8 @@ def main(model_name):
                     }
                 )
             pd.DataFrame(per_case_rows).to_csv(
-                reeval_dir / "per_case" / f"outer{i}_seed{seed_idx}.csv", index=False
+                reeval_dir / "per_case" / f"outer{i}_seed{seed_idx}.csv",
+                index=False, float_format="%.3f",
             )
 
             # computational cost benchmark
@@ -169,7 +170,7 @@ def main(model_name):
             print(f"outer{i} seed{seed_idx} -> {metrics}")
 
     summary_path = reeval_dir / "summary.csv"
-    pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False, float_format="%.3f")
     print(f"\nSummary saved to: {summary_path}")
 
     print("\nRegenerating pooled plots with updated metrics...")

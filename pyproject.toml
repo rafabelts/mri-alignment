@@ -16,6 +16,7 @@ dependencies = [
     "voxelmorph==0.2",
     "neurite>=0.2",
     "pandas>=3.0.5",
+    "optuna>=3.6",
 ]
 
 [tool.uv.sources]

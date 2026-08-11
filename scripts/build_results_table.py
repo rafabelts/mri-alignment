@@ -257,7 +257,7 @@ def main():
 
     df = pd.DataFrame(rows)
     out_path = config.OUTPUTS_DIR / "results_table.csv"
-    df.to_csv(out_path, index=False)
+    df.to_csv(out_path, index=False, float_format="%.3f")
     print(f"\nSaved: {out_path}\n")
 
     display_cols = ["method", "n"] + [f"{m}_mean" for m in METRICS] + [

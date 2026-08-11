@@ -1,29 +1,30 @@
 """
-Nested cross-validation with hyperparameter search over LAMBDA_SMOOTH and
-LEARNING_RATE, for VoxelMorph/TransMorph.
+Nested cross-validation with an Optuna-driven hyperparameter search, for
+VoxelMorph/TransMorph.
 
 Design:
     outer_k=5, inner_k=3
-    grid = LAMBDA_SMOOTH{0.1,0.3,0.5} x LEARNING_RATE{1e-5,1e-4,1e-3} = 9 configs
-    search stage capped at 9 epochs (low-fidelity ranking proxy)
-    final refits: 3 seeds per outer fold, 50 epochs (diminishing-returns point
-        read off the val-loss curves, not early stopping - it never fires here)
+    search space: learning_rate, lambda_smooth, vxm_int_steps, batch_size
+                  (+ lambda_kl for TransMorph only); lambda_dvf fixed at 1.0
+    TRIAL_BUDGET Optuna trials per outer fold, pruned via inner_fold_0's
+        per-epoch val loss (MedianPruner)
+    final refits: 3 seeds per outer fold, 50 epochs (diminishing-returns
+        point read off the val-loss curves, not early stopping)
     tie-break metric: Dice, computed once after training (not per epoch)
 
-Every unit of work (one search config, one final refit, one best-model
-candidate) writes its own result file under outputs/nested_cv/<model>/ right
-after it finishes. Re-running this script re-checks those files first and
-skips anything already written, so an interrupted run (crash, reboot,
-Ctrl+C) can just be restarted with the same command instead of starting over.
+Every unit of work writes its own result file under outputs/nested_cv/<model>/
+right after it finishes (the Optuna study itself is the persistence layer for
+the search stage). Re-running this script skips anything already written, so
+an interrupted run can just be restarted with the same command.
 
 Usage:
     uv run python scripts/nested_cv.py --model voxelmorph
     uv run python scripts/nested_cv.py --model transmorph
-    uv run python scripts/nested_cv.py --model voxelmorph --plot-only  # re-aggregate + re-plot without training
+    uv run python scripts/nested_cv.py --model voxelmorph --plot-only
+    uv run python scripts/nested_cv.py --model voxelmorph --device cuda:0   # + a second process with --device cuda:1
 """
 
 import argparse
-import itertools
 import json
 import os
 import shutil
@@ -35,6 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 import numpy as np
+import optuna
+import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
@@ -47,24 +50,37 @@ from src.preprocessing import preprocess_dataset
 from src.train import train_model
 from src.utils import get_device, set_seed
 
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
 # --- Nested CV design ---
 OUTER_K = 5
 INNER_K = 3
-LAMBDA_SMOOTH_GRID = [0.1, 0.3, 0.5]
-LEARNING_RATE_GRID = [1e-5, 1e-4, 1e-3]
-SEARCH_EPOCH_CAP = 9
+TRIAL_BUDGET = 30
+SEARCH_EPOCH_CAP = 15
 FINAL_EPOCHS = 50
 N_SEEDS = 3
 SEARCH_SEED = 0
 MASTER_SEED = 0
 INTERNAL_VAL_FRACTION = 0.15
 
+# --- search space ---
+LR_RANGE = (1e-5, 1e-3)
+LAMBDA_SMOOTH_RANGE = (0.01, 1.0)
+VXM_INT_STEPS_RANGE = (3, 10)
+BATCH_SIZE_CHOICES = [8, 16, 32]
+LAMBDA_KL_RANGE = (1e-4, 1e-1)  # TransMorph only
 
-def grid_configs():
-    return [
-        {"lambda_smooth": ls, "lr": lr}
-        for ls, lr in itertools.product(LAMBDA_SMOOTH_GRID, LEARNING_RATE_GRID)
-    ]
+
+def suggest_theta(trial, model_name):
+    theta = {
+        "lr": trial.suggest_float("lr", *LR_RANGE, log=True),
+        "lambda_smooth": trial.suggest_float("lambda_smooth", *LAMBDA_SMOOTH_RANGE, log=True),
+        "vxm_int_steps": trial.suggest_int("vxm_int_steps", *VXM_INT_STEPS_RANGE),
+        "batch_size": trial.suggest_categorical("batch_size", BATCH_SIZE_CHOICES),
+    }
+    if model_name == "transmorph":
+        theta["lambda_kl"] = trial.suggest_float("lambda_kl", *LAMBDA_KL_RANGE, log=True)
+    return theta
 
 
 def seeds_for(n, master_seed=MASTER_SEED):
@@ -84,9 +100,9 @@ def subset_by_patients(ram_fixed, ram_moving, ram_dvf, ram_meta, subdirs):
     )
 
 
-def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle):
+def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle, batch_size=config.BATCH_SIZE):
     dataset = MRICineDataset(ram_fixed, ram_moving, ram_dvf, ram_meta)
-    return DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=shuffle)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def internal_train_val_split(
@@ -118,11 +134,14 @@ def evaluate_dice(model, loader, ram_fixed, ram_moving, ram_meta, device):
 
 
 def evaluate_full(model, loader, ram_fixed, ram_moving, ram_meta, device):
+    """Returns (metrics_summary, metric) - `metric` still holds the per-case
+    detail (per_case_reconstructed/per_case_segmentation) for callers that
+    want to save it, instead of only the pooled means."""
     results = inference_with_reconstruction(model, loader, device=device)
     metric = EvaluationMetric(results, ram_fixed, ram_moving, build_lookup(ram_meta))
     epe_list, jac_list, ssim_list = metric.evaluate_reconstructed(ram_meta)
     dice_list, tre_list, hd_list = metric.evaluate_segmentation(ram_meta)
-    return {
+    summary = {
         "epe": float(np.nanmean(epe_list)),
         "jacobian": float(np.nanmean(jac_list)),
         "ssim": float(np.nanmean(ssim_list)),
@@ -130,6 +149,22 @@ def evaluate_full(model, loader, ram_fixed, ram_moving, ram_meta, device):
         "tre": float(np.nanmean(tre_list)),
         "hausdorff": float(np.nanmean(hd_list)),
     }
+    return summary, metric
+
+
+def save_per_case_csv(metric, path):
+    rows = []
+    for key in metric.results:
+        seq_id, frame_idx = key
+        rec = metric.per_case_reconstructed.get(key, {})
+        seg = metric.per_case_segmentation.get(key, {})
+        rows.append({
+            "seq_id": seq_id, "frame_idx": frame_idx,
+            "epe": rec.get("epe"), "jacobian": rec.get("jacobian"), "ssim": rec.get("ssim"),
+            "dice": seg.get("dice"), "tre": seg.get("tre"), "hausdorff": seg.get("hausdorff"),
+        })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False, float_format="%.3f")
 
 
 def save_json(path, data):
@@ -148,6 +183,28 @@ def _mode_with_tiebreak(values, default):
     max_count = max(counts.values())
     tied = [v for v, c in counts.items() if c == max_count]
     return tied[0] if len(tied) == 1 else min(tied, key=lambda v: abs(v - default))
+
+
+def aggregate_theta(thetas, model_name):
+    """
+    Combines the 5 outer folds' winning configs into one. Continuous
+    parameters use the median (mode is meaningless for arbitrary floats -
+    5 folds almost never agree exactly); genuinely discrete/small-set
+    parameters use mode.
+    """
+    theta_final = {
+        "lr": float(np.median([t["lr"] for t in thetas])),
+        "lambda_smooth": float(np.median([t["lambda_smooth"] for t in thetas])),
+        "vxm_int_steps": _mode_with_tiebreak(
+            [t["vxm_int_steps"] for t in thetas], default=config.VXM_INT_STEPS
+        ),
+        "batch_size": _mode_with_tiebreak(
+            [t["batch_size"] for t in thetas], default=config.BATCH_SIZE
+        ),
+    }
+    if model_name == "transmorph":
+        theta_final["lambda_kl"] = float(np.median([t["lambda_kl"] for t in thetas]))
+    return theta_final
 
 
 class NestedCVRunner:
@@ -178,87 +235,85 @@ class NestedCVRunner:
         )
         self.ram = preprocess_dataset(config.DATA_DIR, all_subdirs)
 
-    # --- search stage (inner CV, hyperparameter ranking) ---
+    # --- search stage (inner CV, Optuna hyperparameter search) ---
 
-    def run_search_unit(self, outer_i, inner_j, cfg_idx, cfg, inner_train, inner_val):
-        assert self.ram is not None, "call preprocess_all() before running search units"
-        result_path = (
-            self.results_dir
-            / "search"
-            / f"outer{outer_i}_inner{inner_j}_cfg{cfg_idx}.json"
-        )
-        if result_path.exists():
-            return load_json(result_path)["dice"]
+    def _search_objective(self, trial, outer_i, fold):
+        assert self.ram is not None, "call preprocess_all() before running search trials"
+        theta = suggest_theta(trial, self.model_name)
 
-        train_data = subset_by_patients(*self.ram, inner_train)
-        val_data = subset_by_patients(*self.ram, inner_val)
-        train_loader = make_loader(*train_data, shuffle=True)
-        val_loader = make_loader(*val_data, shuffle=False)
+        dice_scores = []
+        for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
+            train_data = subset_by_patients(*self.ram, inner_train)
+            val_data = subset_by_patients(*self.ram, inner_val)
+            train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
+            val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
 
-        set_seed(SEARCH_SEED)
-        model = build_model(self.model_name, self.device)
-        ckpt_name = f"nested_cv/{self.model_name}/search/outer{outer_i}_inner{inner_j}_cfg{cfg_idx}.pt"
-        _, ckpt_path = train_model(
-            model,
-            train_loader,
-            val_loader,
-            self.device,
-            checkpoint_name=ckpt_name,
-            n_epochs=SEARCH_EPOCH_CAP,
-            lr=cfg["lr"],
-            lambda_smooth=cfg["lambda_smooth"],
-        )
-        model.load_state_dict(
-            torch.load(ckpt_path, map_location=self.device, weights_only=True)
-        )
-        model.eval()
+            set_seed(SEARCH_SEED)
+            model = build_model(self.model_name, self.device, int_steps=theta["vxm_int_steps"])
 
-        dice = evaluate_dice(
-            model, val_loader, val_data[0], val_data[1], val_data[3], self.device
-        )
-        ckpt_path.unlink(
-            missing_ok=True
-        )  # only the score matters for search-stage runs
+            def prune_callback(epoch, val_metrics, inner_j=j):
+                if inner_j == 0:
+                    trial.report(-val_metrics["loss"], step=epoch)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
 
-        save_json(
-            result_path,
-            {"outer": outer_i, "inner": inner_j, "config": cfg, "dice": dice},
-        )
+            ckpt_name = (
+                f"nested_cv/{self.model_name}/search/"
+                f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
+            )
+            _, ckpt_path = train_model(
+                model, train_loader, val_loader, self.device,
+                checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
+                lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
+                lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
+                epoch_callback=prune_callback,
+            )
+            model.load_state_dict(
+                torch.load(ckpt_path, map_location=self.device, weights_only=True)
+            )
+            model.eval()
+
+            dice = evaluate_dice(
+                model, val_loader, val_data[0], val_data[1], val_data[3], self.device
+            )
+            ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
+            dice_scores.append(dice)
+
+        mean_dice = float(np.mean(dice_scores))
         print(
-            f"[search] outer{outer_i} inner{inner_j} cfg{cfg_idx} {cfg} -> dice={dice:.4f}"
+            f"[search] outer{outer_i} trial{trial.number} {theta} "
+            f"-> dice={mean_dice:.4f} ({len(dice_scores)}/{INNER_K} inner folds ran)"
         )
-        return dice
+        return mean_dice
 
-    def pick_theta(self, outer_i, configs):
+    def run_search_stage(self, outer_i, fold):
         theta_path = self.results_dir / "theta" / f"outer{outer_i}.json"
         if theta_path.exists():
             return load_json(theta_path)["theta"]
 
-        avg_dice = []
-        for cfg_idx in range(len(configs)):
-            dices = [
-                load_json(
-                    self.results_dir
-                    / "search"
-                    / f"outer{outer_i}_inner{j}_cfg{cfg_idx}.json"
-                )["dice"]
-                for j in range(INNER_K)
-            ]
-            avg_dice.append(float(np.mean(dices)))
-
-        best_idx = int(np.argmax(avg_dice))
-        theta = configs[best_idx]
-        save_json(
-            theta_path,
-            {
-                "outer": outer_i,
-                "theta": theta,
-                "avg_inner_dice": avg_dice[best_idx],
-                "all_avg_dice": avg_dice,
-            },
+        storage = f"sqlite:///{self.results_dir / 'search' / f'outer{outer_i}.db'}"
+        study = optuna.create_study(
+            study_name=f"{self.model_name}_outer{outer_i}",
+            storage=storage,
+            load_if_exists=True,
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=SEARCH_SEED),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3),
         )
+        remaining = TRIAL_BUDGET - len(study.trials)
+        if remaining > 0:
+            study.optimize(
+                lambda trial: self._search_objective(trial, outer_i, fold), n_trials=remaining
+            )
+
+        theta = study.best_params
+        save_json(theta_path, {
+            "outer": outer_i, "theta": theta,
+            "best_value": study.best_value, "n_trials": len(study.trials),
+        })
         print(
-            f"[theta] outer{outer_i} winner: {theta} (avg inner dice={avg_dice[best_idx]:.4f})"
+            f"[theta] outer{outer_i} winner: {theta} "
+            f"(best inner dice={study.best_value:.4f}, {len(study.trials)} trials)"
         )
         return theta
 
@@ -278,31 +333,27 @@ class NestedCVRunner:
         val_data = subset_by_patients(*self.ram, refit_val)
         test_data = subset_by_patients(*self.ram, outer_test_subdirs)
 
-        train_loader = make_loader(*train_data, shuffle=True)
-        val_loader = make_loader(*val_data, shuffle=False)
-        test_loader = make_loader(*test_data, shuffle=False)
+        train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
+        val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
+        test_loader = make_loader(*test_data, shuffle=False, batch_size=theta["batch_size"])
 
         set_seed(seed)
-        model = build_model(self.model_name, self.device)
+        model = build_model(self.model_name, self.device, int_steps=theta["vxm_int_steps"])
         ckpt_name = (
             f"nested_cv/{self.model_name}/final/outer{outer_i}_seed{seed_idx}.pt"
         )
         history, ckpt_path = train_model(
-            model,
-            train_loader,
-            val_loader,
-            self.device,
-            checkpoint_name=ckpt_name,
-            n_epochs=FINAL_EPOCHS,
-            lr=theta["lr"],
-            lambda_smooth=theta["lambda_smooth"],
+            model, train_loader, val_loader, self.device,
+            checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
+            lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
+            lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
         )
         model.load_state_dict(
             torch.load(ckpt_path, map_location=self.device, weights_only=True)
         )
         model.eval()
 
-        metrics = evaluate_full(
+        metrics, metric = evaluate_full(
             model, test_loader, test_data[0], test_data[1], test_data[3], self.device
         )
         result = {
@@ -319,16 +370,14 @@ class NestedCVRunner:
             self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}_history.json",
             history,
         )
+        save_per_case_csv(
+            metric, self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}_per_case.csv"
+        )
         print(f"[final] outer{outer_i} seed{seed_idx}({seed}) -> {metrics}")
         return result
 
     def run_outer_fold(self, outer_i, fold):
-        configs = grid_configs()
-        for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
-            for c, cfg in enumerate(configs):
-                self.run_search_unit(outer_i, j, c, cfg, inner_train, inner_val)
-
-        theta = self.pick_theta(outer_i, configs)
+        theta = self.run_search_stage(outer_i, fold)
 
         for seed_idx, seed in enumerate(seeds_for(N_SEEDS)):
             self.run_final_refit(
@@ -349,16 +398,9 @@ class NestedCVRunner:
             load_json(self.results_dir / "theta" / f"outer{i}.json")["theta"]
             for i in range(OUTER_K)
         ]
-        theta_final = {
-            "lambda_smooth": _mode_with_tiebreak(
-                [t["lambda_smooth"] for t in thetas], default=config.LAMBDA_SMOOTH
-            ),
-            "lr": _mode_with_tiebreak(
-                [t["lr"] for t in thetas], default=config.LEARNING_RATE
-            ),
-        }
+        theta_final = aggregate_theta(thetas, self.model_name)
         print(
-            f"[best_model] theta_final (majority vote across {OUTER_K} outer folds): {theta_final}"
+            f"[best_model] theta_final (median/mode across {OUTER_K} outer folds): {theta_final}"
         )
 
         all_subdirs = folds[0]["outer_train"] + folds[0]["outer_test"]
@@ -366,8 +408,8 @@ class NestedCVRunner:
 
         train_data = subset_by_patients(*self.ram, full_train)
         val_data = subset_by_patients(*self.ram, full_val)
-        train_loader = make_loader(*train_data, shuffle=True)
-        val_loader = make_loader(*val_data, shuffle=False)
+        train_loader = make_loader(*train_data, shuffle=True, batch_size=theta_final["batch_size"])
+        val_loader = make_loader(*val_data, shuffle=False, batch_size=theta_final["batch_size"])
 
         candidates = []
         for seed_idx, seed in enumerate(seeds_for(N_SEEDS)):
@@ -377,17 +419,15 @@ class NestedCVRunner:
                 continue
 
             set_seed(seed)
-            model = build_model(self.model_name, self.device)
+            model = build_model(
+                self.model_name, self.device, int_steps=theta_final["vxm_int_steps"]
+            )
             ckpt_name = f"nested_cv/{self.model_name}/best_model/seed{seed_idx}.pt"
             history, ckpt_path = train_model(
-                model,
-                train_loader,
-                val_loader,
-                self.device,
-                checkpoint_name=ckpt_name,
-                n_epochs=FINAL_EPOCHS,
-                lr=theta_final["lr"],
-                lambda_smooth=theta_final["lambda_smooth"],
+                model, train_loader, val_loader, self.device,
+                checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
+                lr=theta_final["lr"], lambda_smooth=theta_final["lambda_smooth"],
+                lambda_kl=theta_final.get("lambda_kl", config.LAMBDA_KL),
             )
             model.load_state_dict(
                 torch.load(ckpt_path, map_location=self.device, weights_only=True)
@@ -550,10 +590,10 @@ class NestedCVRunner:
 
 
 def main(args):
-    device = get_device()
+    device = args.device or get_device()
     print(f"Using device: {device}")
     print(
-        f"Design: outer_k={OUTER_K} inner_k={INNER_K} grid={len(grid_configs())} "
+        f"Design: outer_k={OUTER_K} inner_k={INNER_K} trial_budget={TRIAL_BUDGET} "
         f"search_cap={SEARCH_EPOCH_CAP} seeds={N_SEEDS} final_epochs={FINAL_EPOCHS}"
     )
 
@@ -579,5 +619,13 @@ if __name__ == "__main__":
         "--plot-only",
         action="store_true",
         help="Skip training, only aggregate + plot already-persisted results",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="e.g. cuda:0, cuda:1, cpu - defaults to the auto-detected device. "
+             "Run two processes with different values for dual-GPU parallel search "
+             "(both hit the same Optuna storage, so trials are naturally split).",
     )
     main(parser.parse_args())

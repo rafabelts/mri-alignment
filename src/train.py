@@ -20,10 +20,15 @@ def train_model(model, train_loader, val_loader, device,
                  n_epochs=N_EPOCHS, lr=LEARNING_RATE, patience=PATIENCE,
                  lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH, lambda_kl=LAMBDA_KL,
                  scheduler_factor=SCHEDULER_FACTOR, scheduler_patience=SCHEDULER_PATIENCE,
-                 grad_clip_max_norm=GRAD_CLIP_MAX_NORM):
+                 grad_clip_max_norm=GRAD_CLIP_MAX_NORM, epoch_callback=None):
     """
     Trains 'model' with direct supervision (EPE + smoothness) against the
     real DVF, with early stopping and LR reduction in plateau.
+
+    `epoch_callback(epoch, val_metrics)`, if given, is called after every
+    epoch (e.g. for Optuna pruning) - raising from it stops training
+    immediately, propagating out of this function as-is. Keeps this module
+    unaware of what the callback actually does or raises.
 
     Returns
     -------
@@ -61,6 +66,9 @@ def train_model(model, train_loader, val_loader, device,
         for k, v in val_metrics.items():
             history[f"val_{k}"].append(v)
         history["epoch_time"].append(epoch_time)
+
+        if epoch_callback is not None:
+            epoch_callback(epoch, val_metrics)
 
         print(f"Epoch {epoch + 1}/{n_epochs} ({epoch_time:.1f}s)")
         print(f"  train -> loss: {train_metrics['loss']:.4f} | epe: {train_metrics['epe']:.4f} "
