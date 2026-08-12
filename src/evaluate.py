@@ -123,12 +123,17 @@ class EvaluationMetric:
 
         return ssim(img_moving_np, warped, data_range=data_range)
 
-    def evaluate_reconstructed(self, ram_meta):
+    def evaluate_reconstructed(self, ram_meta, log_prefix=""):
         """
         Computes EPE (mm, against GT DVF, masked to anatomy), % negative
         Jacobian, and SSIM for every case in `self.results`, printing the
         mean ± std across cases and storing per-case values in
         `self.per_case_reconstructed`.
+
+        `log_prefix` is prepended to the printed summary lines - matters when
+        this runs concurrently from multiple threads (e.g. one per Optuna
+        trial), since their unlabeled prints would otherwise interleave in
+        the shared console with no way to tell which trial they belong to.
 
         Returns
         -------
@@ -161,9 +166,9 @@ class EvaluationMetric:
 
             self.per_case_reconstructed[key] = {"epe": epe_val, "jacobian": jac_val, "ssim": ssim_val}
 
-        print(f"EPE average (mm): {np.mean(epe_list):.4f} ± {np.std(epe_list):.4f}")
-        print(f"% negative jacobian (reconstructed): {np.mean(pct_neg_jac_list):.4f} ± {np.std(pct_neg_jac_list):.4f}")
-        print(f"SSIM (moving vs warped): {np.mean(ssim_list):.4f} ± {np.std(ssim_list):.4f}")
+        print(f"{log_prefix}EPE average (mm): {np.mean(epe_list):.4f} ± {np.std(epe_list):.4f}")
+        print(f"{log_prefix}% negative jacobian (reconstructed): {np.mean(pct_neg_jac_list):.4f} ± {np.std(pct_neg_jac_list):.4f}")
+        print(f"{log_prefix}SSIM (moving vs warped): {np.mean(ssim_list):.4f} ± {np.std(ssim_list):.4f}")
 
         return epe_list, pct_neg_jac_list, ssim_list
 
