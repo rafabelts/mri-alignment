@@ -29,7 +29,9 @@ ground-truth DVFs (Charbonnier EPE loss + smoothness regularization;
 TransMorph-diff additionally adds a KL term for its probabilistic head). All
 three methods are evaluated with the same metrics so results are directly
 comparable: EPE (mm), % negative Jacobian (folding), SSIM, and
-tumor-segmentation-based Dice / TRE (mm) / Hausdorff distance (mm) - all
+region-of-interest-segmentation-based Dice / TRE (mm) / Hausdorff distance
+(mm) (the segmented region is the tumor, an organ-at-risk, or both,
+depending on the case) - all
 physical-unit metrics go through the case's real spacing/origin/direction
 (`EvaluationMetric._physical_points` / `_pixel_vector_to_physical` in
 `src/evaluate.py`), not just a bare spacing multiply.
@@ -46,7 +48,7 @@ search in the inner loop, pooled outer-test metrics as the headline result).
 - [x] TransMorph-diff (custom 2D probabilistic model)
 - [x] Classical (non-DL) B-Spline registration baseline
 - [x] Metrics: EPE (mm), % negative Jacobian, SSIM, Dice, TRE (mm), Hausdorff (mm)
-- [x] Per-architecture best-model selection (majority-vote hyperparameters + best seed)
+- [x] Per-architecture best-model selection (median/mode-aggregated hyperparameters + best seed)
 - [x] Qualitative comparison figures (VoxelMorph vs TransMorph vs Classical vs GT)
 - [x] Cross-method quantitative results table + combined comparison plot
 
@@ -66,7 +68,8 @@ mri-alignment/
 │   ├── train.py                  # Training loop (early stopping, LR scheduling) + inference benchmark
 │   ├── evaluate.py               # Patch reconstruction + EPE/Jacobian/SSIM/Dice/TRE/Hausdorff metrics (mm-aware)
 │   ├── visualize.py              # Qualitative plots: patches, reconstructed fixed/moving/warped/DVF
-│   └── io_utils.py                # External-image inference: read/write .mha, pad/crop, denormalize
+│   ├── io_utils.py               # External-image inference: read/write .mha, pad/crop, denormalize
+│   └── utils.py                  # get_device() / set_seed() shared across the pipeline
 ├── scripts/
 │   ├── nested_cv.py                    # Nested CV + hyperparameter search + best-model selection, per architecture
 │   ├── evaluate_checkpoints.py         # Re-run metrics on already-trained checkpoints (e.g. after a metric change)
@@ -93,8 +96,8 @@ data/TrackRad/
     ├── DVFReverse/
     │   └── dvfReverseXXX.mha  # ground-truth DVF for each moving frame
     └── SynthesizedSegmentations/
-        ├── seg_000.mha        # tumor segmentation for the fixed frame
-        └── seg_XXX.mha        # tumor segmentation for each moving frame
+        ├── seg_000.mha        # region-of-interest (tumor/OAR) segmentation, fixed frame
+        └── seg_XXX.mha        # region-of-interest (tumor/OAR) segmentation, each moving frame
 ```
 
 Patients are split at the patient level, stratified by cohort letter, so all
@@ -128,6 +131,11 @@ uv sync
 # Run the full nested CV + hyperparameter search + best-model selection for one architecture
 uv run python scripts/nested_cv.py --model voxelmorph
 uv run python scripts/nested_cv.py --model transmorph
+
+# Same, but split the search stage's Optuna trials across multiple GPUs
+# (one trial per device at a time; final refit and best-model stages stay
+# single-threaded on the first device regardless of how many are listed)
+uv run python scripts/nested_cv.py --model voxelmorph --devices cuda:0,cuda:1
 
 # Re-aggregate + re-plot an in-progress or finished run without training anything
 uv run python scripts/nested_cv.py --model voxelmorph --plot-only
