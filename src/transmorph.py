@@ -1,24 +1,51 @@
 """
-A probabilistc variant inspired by Transmorph-diff (Chen et al., 2021)
-and the probabilistc framework of Dalca et al. (2018) which that paper
-cites as its basis. Transformer Encoder + CNN decoder, with probabilistc
-head (mean + log-variance of the velocity field).
+2D probabilistic diffeomorphic registration model: CNN encoder + Transformer
+self-attention bottleneck + CNN decoder, with a probabilistic head that
+predicts the mean and log-variance of a stationary velocity field instead of
+a single deterministic deformation. During training the field is sampled via
+reparameterization (so gradients flow through the sample); at inference the
+mean is used directly, so the model is deterministic in production.
 
+The Transformer-in-a-registration-network idea follows TransMorph
+(Chen et al., 2021, "TransMorph: Transformer for unsupervised medical image
+registration"); the probabilistic mean/log-variance head, the KL term, and
+the diffeomorphic velocity-field formulation follow the probabilistic
+diffeomorphic framework of Dalca et al. (2018, "Unsupervised Learning of
+Probabilistic Diffeomorphic Registration for Images and Surfaces"), which
+TransMorph's diffeomorphic variant itself builds on.
 
-Note: this is a 2D adaptation, not a port of the original code by Chen et al.
-(which is 3D, uses a full Swin Transformer encoder, and its own spatial transformer
-in normalized coordinates [-1, 1]). Here, we reuse the diffeomorphic integration
-(VecInt) and warping (SpatialTransformer) from voxelmorph-which have already
-been validated in this project—to maintain a single, consistent
-coordinate convention throughout the entire pipeline.
+This is a 2D, from-scratch design, not a port of any specific 3D
+implementation - it does not use TransMorph's hierarchical/windowed (Swin)
+attention encoder, and its spatial transformer works in pixel coordinates.
+It reuses two building blocks from `voxelmorph` (Balakrishnan et al., 2019):
+`VecInt` (scaling-and-squaring integration, in the sense of Ashburner 2007 /
+Dalca et al. 2018) and `SpatialTransformer` (warping), instead of writing
+them from scratch, so that this model resamples images and integrates flow
+fields with the exact same numerics and pixel-coordinate convention as the
+other (VoxelMorph) model in this project.
 
-Mantains the same VoxelMorph interface:
+Exposes the same interface used elsewhere for the other model:
     model(source, target, registration=True) -> (moved, pos_flow)
-in that way train and eval function doesnt need to be modified.
+so the training/eval code doesn't need a separate code path per model.
 
-The term KL (variance regularization, simplified version against an N(0, I) prior)
-is displayed as the 'model.last_kl_loss' attribute after each forward pass.
+Each forward pass also sets `self.last_kl_loss`: a regularization term on
+the predicted mean/log-variance of the velocity field, pulling it toward
+low-variance, spatially smooth predictions, for the caller to add to the
+training loss.
+
+References
+---------
+- Chen et al. (2021). TransMorph: Transformer for unsupervised medical
+  image registration. Medical Image Analysis.
+- Dalca et al. (2018). Unsupervised Learning of Probabilistic Diffeomorphic
+  Registration for Images and Surfaces. MICCAI.
+- Balakrishnan et al. (2019). VoxelMorph: A Learning Framework for
+  Deformable Medical Image Registration. IEEE TMI.
+- Ashburner (2007). A fast diffeomorphic image registration algorithm.
+  NeuroImage. (scaling-and-squaring integration of a stationary velocity field)
 """
+
+import math
 
 import torch
 from torch import nn
@@ -38,7 +65,12 @@ class ConvBlock(nn.Module):
 
 
 class TransformerBottleneck(nn.Module):
-    """Standard self-attention on the most compressed feature map"""
+    """Standard self-attention on the most compressed feature map.
+
+    The idea of putting a Transformer inside a registration network follows
+    TransMorph (Chen et al., 2021); unlike TransMorph's Swin encoder, this
+    is plain dense self-attention applied only at the bottleneck.
+    """
 
     def __init__(self, embed_dim, num_tokens, depth=4, num_heads=4):
         super().__init__()
@@ -99,18 +131,28 @@ class TransMorphDiff(nn.Module):
         self.up3 = ConvBlock(32 + 16, 16)
         self.up4 = ConvBlock(16 + 2, 16)
 
-        # -- Probabilistic head: mean and variance-log --
+        # -- Probabilistic head: mean and variance-log (Dalca et al., 2018) --
+        # predicts q(velocity | fixed, moving) = N(mean, diag(exp(logvar)))
         self.flow_mean_head = nn.Conv2d(16, ndims, kernel_size=3, padding=1)
         self.flow_logvar_head = nn.Conv2d(16, ndims, kernel_size=3, padding=1)
 
         # starts almost in 0: when beginning, predicts deformation ~nil
-        # and small variance (avoids chaotic in the early epochs)
+        # and small variance (avoids chaotic in the early epochs). Same
+        # near-identity init trick as Dalca et al. (2018) / voxelmorph.
         nn.init.normal_(self.flow_mean_head.weight, mean=0.0, std=1e-5)
         nn.init.constant_(self.flow_mean_head.bias, 0.0)
         nn.init.normal_(self.flow_logvar_head.weight, mean=0.0, std=1e-10)
         nn.init.constant_(self.flow_logvar_head.bias, -10.0)
 
-        # -- Difeomorphic integration and wrapping, recicled from voxelmorph --
+        # -- Turns the predicted velocity field into an invertible displacement --
+        # (all three layers reused from voxelmorph, Balakrishnan et al. 2019)
+        # `resize`/`fullsize` down/upsample the field around the integration step
+        # (cheaper and more regular at lower resolution); `integrate` runs
+        # scaling-and-squaring (Ashburner 2007 / Dalca et al. 2018) to turn the
+        # (stationary) velocity field into an actual, guaranteed-invertible
+        # displacement field; `transformer` resamples `source` with that
+        # displacement field via bilinear grid sampling.
+        self.int_downsize = int_downsize
         down_shape = [int(d / int_downsize) for d in inshape]
         self.resize = (
             vxm_layers.ResizeTransform(int_downsize, ndims)
@@ -152,10 +194,11 @@ class TransMorphDiff(nn.Module):
             (B, 1, H, W) images.
         registration : bool
             If False (training), returns the pre-integration flow
-            (`preint_flow`), needed to compute the supervised DVF loss on the
-            same field the KL term regularizes. If True (inference/eval),
-            returns the final integrated flow (`pos_flow`), i.e. the actual
-            displacement field used to produce `y_source`.
+            (`preint_flow`), sampled from the mean/log-variance heads
+            *after* they've been resized to the integration resolution
+            (`inshape / int_downsize`). If True (inference/eval), returns
+            the final integrated flow (`pos_flow`) at full resolution, i.e.
+            the actual displacement field used to produce `y_source`.
 
         Returns
         -------
@@ -196,24 +239,48 @@ class TransMorphDiff(nn.Module):
         flow_mean = self.flow_mean_head(u4)
         flow_logvar = self.flow_logvar_head(u4)
 
-        # dalca/chen-style KL: sigma_term (weighted by the degree of neighbors)
-        degree = 4.0  # approximation of the degree of neighbors in 2D (4-connectivity)
+        # KL against the smooth velocity-field prior (Dalca et al., 2018, eq. for
+        # KL(q||p) with a Markov-graph precision; here approximated on the 2D pixel
+        # grid). sigma_term penalizes large predicted variances (scaled by prior_lambda
+        # and the 2D 4-neighbour degree) and rewards informative ones (the -flow_logvar
+        # term keeps it from collapsing the variance to zero for free); prec_term
+        # penalizes a non-smooth mean field, also scaled by prior_lambda so both terms
+        # carry the same prior strength. Together they pull the distribution toward
+        # "small, confident, spatially smooth deformation".
+        degree = 4.0  # neighbour count in a 2D 4-connected pixel grid
         sigma_term = torch.mean(
             self.prior_lambda * degree * torch.exp(flow_logvar) - flow_logvar
         )
-        prec_term = self._diffusion_penalty(flow_mean)
+        prec_term = self.prior_lambda * self._diffusion_penalty(flow_mean)
         self.last_kl_loss = 0.5 * (sigma_term + prec_term)
 
+        # Move mean/logvar to the integration grid (inshape / int_downsize) before
+        # sampling, so the noise is drawn where VecInt integrates. flow_mean is a pixel
+        # displacement field, so it goes through ResizeTransform (interpolate + rescale
+        # magnitude by factor). flow_logvar must NOT: ResizeTransform would multiply it
+        # by factor, but a log-variance rescales *additively* - since std' = factor*std,
+        # logvar' = logvar + 2*ln(factor) (= -1.386 nats for factor=0.5). Passing it
+        # through ResizeTransform instead would give factor*logvar, injecting the wrong
+        # amount of noise (~24x too much std at the -10 init bias). So interpolate it
+        # and add the 2*ln(factor) shift by hand - do not "simplify" this back to
+        # self.resize(flow_logvar).
+        mean_for_int = flow_mean
+        logvar_for_int = flow_logvar
+        if self.resize:
+            factor = 1.0 / self.int_downsize
+            mean_for_int = self.resize(flow_mean)
+            logvar_for_int = nn.functional.interpolate(
+                flow_logvar, scale_factor=factor, mode="bilinear", align_corners=True
+            ) + 2.0 * math.log(factor)
+
         if self.training:
-            std = torch.exp(0.5 * flow_logvar)
+            std = torch.exp(0.5 * logvar_for_int)
             eps = torch.randn_like(std)
-            preint_flow = flow_mean + eps * std
+            preint_flow = mean_for_int + eps * std
         else:
-            preint_flow = flow_mean
+            preint_flow = mean_for_int
 
         pos_flow = preint_flow
-        if self.resize:
-            pos_flow = self.resize(pos_flow)
         if self.integrate:
             pos_flow = self.integrate(pos_flow)
             if self.fullsize:
