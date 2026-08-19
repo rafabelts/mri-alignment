@@ -1,7 +1,7 @@
 """
 Evaluates ClassicalBRegistration (SimpleITK B-Spline) on the full TrackRad
 dataset with the same metrics used for the deep-learning models (EPE, %
-negative Jacobian, SSIM, Dice, TRE, Hausdorff) - a directly comparable
+negative Jacobian, SSIM, Dice, TRE, HD95) - a directly comparable
 baseline number against the nested_cv.py pooled results.
 
 Unlike the deep-learning pipeline, no patching/stitching is needed here:
@@ -62,7 +62,7 @@ def main():
     meta_lookup = build_lookup(ram_meta)
     metric = EvaluationMetric(results, ram_fixed, ram_moving, meta_lookup)
     epe_list, jac_list, ssim_list = metric.evaluate_reconstructed(ram_meta)
-    dice_list, tre_list, hd_list = metric.evaluate_segmentation(ram_meta)
+    dice_list, tre_list, hd95_list = metric.evaluate_segmentation(ram_meta)
 
     out_dir = config.OUTPUTS_DIR / "classical_registration"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ def main():
         per_case_rows.append({
             "seq_id": seq_id, "frame_idx": frame_idx,
             "epe": rec.get("epe"), "jacobian": rec.get("jacobian"), "ssim": rec.get("ssim"),
-            "dice": seg.get("dice"), "tre": seg.get("tre"), "hausdorff": seg.get("hausdorff"),
+            "dice": seg.get("dice"), "tre": seg.get("tre"), "hd95": seg.get("hd95"),
             "reg_time_s": reg_times.get(key),
         })
     per_case_path = out_dir / "per_case.csv"
@@ -87,7 +87,7 @@ def main():
         "n_cases": len(results),
         "dice_mean": float(np.nanmean(dice_list)), "dice_std": float(np.nanstd(dice_list)),
         "tre_mean": float(np.nanmean(tre_list)), "tre_std": float(np.nanstd(tre_list)),
-        "hausdorff_mean": float(np.nanmean(hd_list)), "hausdorff_std": float(np.nanstd(hd_list)),
+        "hd95_mean": float(np.nanmean(hd95_list)), "hd95_std": float(np.nanstd(hd95_list)),
         "epe_mean": float(np.mean(epe_list)), "epe_std": float(np.std(epe_list)),
         "jacobian_mean": float(np.mean(jac_list)), "jacobian_std": float(np.std(jac_list)),
         "ssim_mean": float(np.mean(ssim_list)), "ssim_std": float(np.std(ssim_list)),
@@ -109,7 +109,7 @@ def main():
     print(summary)
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    for ax, values, title in zip(axes, [dice_list, tre_list, hd_list], ["Dice", "TRE (mm)", "Hausdorff (mm)"]):
+    for ax, values, title in zip(axes, [dice_list, tre_list, hd95_list], ["Dice", "TRE (mm)", "HD95 (mm)"]):
         clean = [v for v in values if not np.isnan(v)]
         ax.violinplot([clean], showmeans=True, showextrema=True)
         ax.set_xticks([1])

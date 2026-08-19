@@ -1,27 +1,27 @@
 """
 Pulls together the pooled quantitative results from classical B-Spline
-registration, VoxelMorph, and TransMorph into one CSV table and one combined
+registration, VoxelMorph, and CNNTransformerSVF2D into one CSV table and one combined
 violin plot.
 
 Re-runs inference for all three methods (evaluate_classical_registration.py
 and evaluate_checkpoints.py for each architecture) to get current
-registration accuracy metrics (Dice, TRE, Hausdorff, EPE, Jacobian, SSIM),
+registration accuracy metrics (Dice, TRE, HD95, EPE, Jacobian, SSIM),
 then reads the resulting JSON/CSV files. Compute cost (inference time, FPS,
 params) is benchmarked separately, fresh each run, per architecture.
 
 Outputs:
-    outputs/results_table.csv               - one row per method
-    outputs/pooled_comparison_all_methods.png - Dice/TRE/Hausdorff violins,
+    outputs/results_table.csv               - compact paper table, one row per method
+    outputs/pooled_comparison_all_methods.png - Dice/TRE/HD95 violins,
         all three methods side by side (classical drawn from ~4977 per-case
-        values, VoxelMorph/TransMorph from their 15 pooled outer-test values)
+        values, VoxelMorph/CNNTransformerSVF2D from their 15 pooled outer-test values)
     outputs/paired_significance_test.json - Wilcoxon signed-rank test between
-        VoxelMorph and TransMorph on per-outer-fold mean Dice/TRE/Hausdorff
+        VoxelMorph and CNNTransformerSVF2D on per-outer-fold mean Dice/TRE/HD95
         (paired because both share the same cv_splits outer-fold partition)
 
 Result sources (read after re-running inference):
     outputs/classical_registration/summary.json, per_case.csv
     outputs/nested_cv/voxelmorph/final/outer*_seed*.json   (15 files, pooled)
-    outputs/nested_cv/transmorph/final/outer*_seed*.json   (15 files, pooled)
+    outputs/nested_cv/cnn_transformer_svf_2d/final/outer*_seed*.json   (15 files, pooled)
 
 Usage:
     uv run python scripts/build_results_table.py
@@ -47,7 +47,7 @@ from src.preprocessing import preprocess_dataset
 from src.train import benchmark_model
 from src.utils import get_device
 
-METRICS = ["dice", "tre", "hausdorff", "epe", "jacobian", "ssim"]
+METRICS = ["dice", "tre", "hd95", "epe", "jacobian", "ssim"]
 
 
 def classical_accuracy():
@@ -73,9 +73,19 @@ def dl_accuracy(model_name, label):
     records = [load_json(f) for f in files]
     row = {"method": label, "n": len(records)}
     for m in METRICS:
-        values = [r["metrics"][m] for r in records]
+        # Seeds quantify training variability within an outer split. They are
+        # averaged first, leaving the five independent patient-level folds as
+        # the observations used for the global mean and SD.
+        values = dl_fold_means(model_name, m)
         row[f"{m}_mean"] = float(np.nanmean(values))
         row[f"{m}_std"] = float(np.nanstd(values))
+    latency = []
+    for outer in sorted({r["outer"] for r in records}):
+        per_seed = [r["benchmark"]["inference_time_ms_mean"] for r in records
+                    if r["outer"] == outer]
+        latency.append(float(np.nanmean(per_seed)))
+    row["latency_mean"] = float(np.nanmean(latency))
+    row["latency_std"] = float(np.nanstd(latency))
     return row
 
 
@@ -96,31 +106,31 @@ def dl_fold_means(model_name, metric):
         return None
     records = [load_json(f) for f in files]
     outer_folds = sorted({r["outer"] for r in records})
-    return [float(np.mean([r["metrics"][metric] for r in records if r["outer"] == i]))
+    return [float(np.nanmean([r["metrics"][metric] for r in records if r["outer"] == i]))
             for i in outer_folds]
 
 
 def paired_significance_tests():
     """
-    Paired Wilcoxon signed-rank test between VoxelMorph and TransMorph on
-    per-outer-fold mean Dice/TRE/Hausdorff - paired because both
+    Paired Wilcoxon signed-rank test between VoxelMorph and CNNTransformerSVF2D on
+    per-outer-fold mean Dice/TRE/HD95 - paired because both
     architectures share the same outer-fold patient partition (same
     cv_splits random_state), unlike classical, which has no fold structure
     to pair against.
     """
     results = {}
-    for metric in ["dice", "tre", "hausdorff"]:
+    for metric in ["dice", "tre", "hd95"]:
         vxm = dl_fold_means("voxelmorph", metric)
-        tm = dl_fold_means("transmorph", metric)
-        if vxm is None or tm is None or len(vxm) != len(tm):
+        proposal = dl_fold_means("cnn_transformer_svf_2d", metric)
+        if vxm is None or proposal is None or len(vxm) != len(proposal):
             print(f"Skipping paired test on {metric} - missing or mismatched fold data.")
             continue
 
-        stat, p_value = wilcoxon(vxm, tm)
+        stat, p_value = wilcoxon(vxm, proposal)
         results[metric] = {
             "n_folds": len(vxm),
             "voxelmorph_fold_means": vxm,
-            "transmorph_fold_means": tm,
+            "cnn_transformer_svf_2d_fold_means": proposal,
             "statistic": float(stat),
             "p_value": float(p_value),
         }
@@ -147,20 +157,20 @@ def classical_per_case_values(metric):
 
 def combined_violin_plot():
     """
-    Saves one figure with Classical/VoxelMorph/TransMorph violins side by
-    side for Dice, TRE, and Hausdorff. Classical's violin is drawn from all
-    per-case values (~4977); VoxelMorph/TransMorph's from their 15 pooled
+    Saves one figure with Classical/VoxelMorph/CNNTransformerSVF2D violins side by
+    side for Dice, TRE, and HD95. Classical's violin is drawn from all
+    per-case values (~4977); VoxelMorph/CNNTransformerSVF2D's from their 15 pooled
     outer-test values - different sample sizes are shown as-is, since each
     reflects what data is actually available for that method.
     """
     sources = {
         "Classical": lambda m: classical_per_case_values(m),
         "VoxelMorph": lambda m: dl_pooled_values("voxelmorph", m),
-        "TransMorph": lambda m: dl_pooled_values("transmorph", m),
+        "CNNTransformerSVF2D": lambda m: dl_pooled_values("cnn_transformer_svf_2d", m),
     }
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    for ax, metric, title in zip(axes, ["dice", "tre", "hausdorff"], ["Dice", "TRE (mm)", "Hausdorff (mm)"]):
+    for ax, metric, title in zip(axes, ["dice", "tre", "hd95"], ["Dice", "TRE (mm)", "HD95 (mm)"]):
         labels, data = [], []
         for name, getter in sources.items():
             values = getter(metric)
@@ -228,20 +238,20 @@ def main():
     print("\nRe-running inference for VoxelMorph's checkpoints...")
     evaluate_checkpoints.main("voxelmorph")
 
-    print("\nRe-running inference for TransMorph's checkpoints...")
-    evaluate_checkpoints.main("transmorph")
+    print("\nRe-running inference for CNNTransformerSVF2D checkpoints...")
+    evaluate_checkpoints.main("cnn_transformer_svf_2d")
 
     print(f"\nBenchmarking compute cost on device: {device}\n")
 
     accuracy_rows = [
         classical_accuracy(),
         dl_accuracy("voxelmorph", "VoxelMorph"),
-        dl_accuracy("transmorph", "TransMorph"),
+        dl_accuracy("cnn_transformer_svf_2d", "CNNTransformerSVF2D"),
     ]
     benchmarks = {
         "Classical (B-Spline)": classical_benchmark(),
         "VoxelMorph": dl_benchmark("voxelmorph", device),
-        "TransMorph": dl_benchmark("transmorph", device),
+        "CNNTransformerSVF2D": dl_benchmark("cnn_transformer_svf_2d", device),
     }
 
     rows = []
@@ -255,15 +265,27 @@ def main():
         print("Nothing found to build a table from.")
         return
 
-    df = pd.DataFrame(rows)
+    def paper_value(row, metric, digits=3):
+        return f"{row[f'{metric}_mean']:.{digits}f} ± {row[f'{metric}_std']:.{digits}f}"
+
+    paper_rows = []
+    for row in rows:
+        latency_mean = row.get("latency_mean", row.get("inference_time_ms_mean"))
+        latency_std = row.get("latency_std", row.get("inference_time_ms_std"))
+        paper_rows.append({
+            "Method": row["method"],
+            "TRE (mm) ↓": paper_value(row, "tre"),
+            "DVF EPE (mm) ↓": paper_value(row, "epe"),
+            "Dice ↑": paper_value(row, "dice"),
+            "HD95 (mm) ↓": paper_value(row, "hd95"),
+            "Latency (ms) ↓": f"{latency_mean:.3f} ± {latency_std:.3f}",
+        })
+    df = pd.DataFrame(paper_rows)
     out_path = config.OUTPUTS_DIR / "results_table.csv"
     df.to_csv(out_path, index=False, float_format="%.3f")
     print(f"\nSaved: {out_path}\n")
 
-    display_cols = ["method", "n"] + [f"{m}_mean" for m in METRICS] + [
-        "inference_time_ms_mean", "fps", "device"
-    ]
-    print(df[display_cols].to_string(index=False))
+    print(df.to_string(index=False))
 
     combined_violin_plot()
 

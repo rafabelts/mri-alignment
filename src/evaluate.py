@@ -23,8 +23,8 @@ def inference_with_reconstruction(model, loader, device="cuda"):
 
     with torch.no_grad():
         for img_fixed, img_moving, gt_dvf, meta in loader:
-            img_fixed = img_fixed.to(device).float()
-            img_moving = img_moving.to(device).float()
+            img_fixed = img_fixed.to(device, non_blocking=True).float()
+            img_moving = img_moving.to(device, non_blocking=True).float()
 
             moved, pred_dvf = model(img_fixed, img_moving, registration=True)
 
@@ -157,7 +157,9 @@ class EvaluationMetric:
                 epe_list.append(epe_val)
 
             jac = self.jacobian_determinant(pred_dvf)
-            jac_val = (jac < 0).sum() / jac.size * 100
+            # Folding is defined consistently as det(J) <= 0: zero determinant
+            # is non-invertible just like a negative determinant.
+            jac_val = (jac <= 0).sum() / jac.size * 100
             pct_neg_jac_list.append(jac_val)
 
             ssim_val = self.compute_ssim(key, pred_dvf)
@@ -197,7 +199,7 @@ class EvaluationMetric:
         DVF (nearest-neighbor, is binary mask), and computes Dice + TRE (distance between
         centroids) against the real segmentation from 'moving'.
         """
-        dice_list, tre_list, hd_list = [], [], []
+        dice_list, tre_list, hd95_list = [], [], []
         self.per_case_segmentation = {}
 
         for key, r in self.results.items():
@@ -238,11 +240,15 @@ class EvaluationMetric:
             dice_val = 2 * intersection / (denom + 1e-8) if denom > 0 else np.nan
             dice_list.append(dice_val)
 
-            hd_val = np.nan
-            # Hausdorff Distance (mm)
-            if (warped_seg > 0).any() and (seg_moving > 0).any():
-                hd_val = self._hausdorff_mm(warped_seg > 0, seg_moving > 0, spatial_meta)
-            hd_list.append(hd_val)
+            hd95_val = self._hausdorff95_mm(
+                warped_seg > 0, seg_moving > 0, spatial_meta
+            )
+            # Keep the established evaluation convention: cases for which
+            # either target is empty are unavailable for surface-distance
+            # aggregation, rather than contributing an infinite value.
+            if not np.isfinite(hd95_val):
+                hd95_val = np.nan
+            hd95_list.append(hd95_val)
 
             c_pred = self._centroid(warped_seg)
             c_real = self._centroid(seg_moving)
@@ -253,36 +259,40 @@ class EvaluationMetric:
             tre_list.append(tre_val)
 
             self.per_case_segmentation[key] = {
-                "dice": dice_val, "tre": tre_val, "hausdorff": hd_val,
+                "dice": dice_val, "tre": tre_val, "hd95": hd95_val,
                 "tumor_area_px": int((seg_moving > 0).sum()),
                 "bbox_diag": bbox_diag,
                 "bbox_diag_mm": bbox_diag_mm,
-                "hausdorff_norm_bbox": hd_val / bbox_diag_mm if bbox_diag_mm else np.nan,
+                "hd95_norm_bbox": hd95_val / bbox_diag_mm if bbox_diag_mm else np.nan,
                 "tre_norm_bbox": tre_val / bbox_diag_mm if bbox_diag_mm else np.nan,
             }
 
         print(f"Dice: {np.nanmean(dice_list):.4f} ± {np.nanstd(dice_list):.4f}")
-        print(f"Hausdorff Distance (mm): {np.nanmean(hd_list):.4f} ± {np.nanstd(hd_list):.4f}")
+        print(f"HD95 (mm): {np.nanmean(hd95_list):.4f} ± {np.nanstd(hd95_list):.4f}")
         print(f"TRE (mm): {np.nanmean(tre_list):.4f} ± {np.nanstd(tre_list):.4f}")
 
-        return dice_list, tre_list, hd_list
+        return dice_list, tre_list, hd95_list
 
     @staticmethod
-    def _hausdorff_mm(mask_a, mask_b, spatial_meta):
-        """Standard (symmetric) Hausdorff distance in mm between nonzero pixels
-        of two masks, converting pixel coordinates to physical space via the
-        image's actual spacing/origin/direction before the nearest-neighbor
-        search (correct under anisotropic spacing and non-identity direction,
-        not just axis-aligned isotropic spacing)."""
+    def _hausdorff95_mm(mask_a, mask_b, spatial_meta):
+        """Symmetric 95th-percentile Hausdorff distance in physical mm.
+
+        Foreground pixels are converted with the existing physical-coordinate
+        implementation before bidirectional nearest-neighbour distances are
+        concatenated. Two empty masks return 0; exactly one empty mask returns
+        infinity. ``evaluate_segmentation`` preserves the pipeline's prior
+        aggregation behaviour by recording the latter case as NaN.
+        """
         a_points = EvaluationMetric._physical_points(np.transpose(np.nonzero(mask_a)), spatial_meta)
         b_points = EvaluationMetric._physical_points(np.transpose(np.nonzero(mask_b)), spatial_meta)
         if len(a_points) == 0:
             return 0.0 if len(b_points) == 0 else np.inf
         if len(b_points) == 0:
             return np.inf
-        fwd = cKDTree(a_points).query(b_points, k=1)[0]
-        bwd = cKDTree(b_points).query(a_points, k=1)[0]
-        return max(fwd.max(), bwd.max())
+        a_to_b = cKDTree(b_points).query(a_points, k=1)[0]
+        b_to_a = cKDTree(a_points).query(b_points, k=1)[0]
+        distances = np.concatenate((a_to_b, b_to_a))
+        return float(np.percentile(distances, 95))
 
     @staticmethod
     def _centroid(mask):

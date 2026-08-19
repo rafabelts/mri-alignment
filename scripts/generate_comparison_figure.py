@@ -1,5 +1,5 @@
 """
-Generates a qualitative side-by-side comparison figure (VoxelMorph vs. TransMorph
+Generates a qualitative side-by-side comparison figure (VoxelMorph vs. CNNTransformerSVF2D
 vs. classical B-Spline registration vs. ground truth) for one or more test cases,
 and exports the underlying fixed/warped/DVF/propagated-segmentation volumes as
 .mha files.
@@ -122,9 +122,11 @@ def run_dl_model(model_name, checkpoint_name, loader, device):
     return results[key]["pred_dvf"], results[key]["anatomy_mask"]
 
 
-def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, device):
+def generate_figure_for_case(
+    patient, frame, vxm_checkpoint, proposal_checkpoint, device
+):
     """
-    Runs VoxelMorph, TransMorph, and classical B-Spline registration on a single
+    Runs VoxelMorph, CNNTransformerSVF2D, and classical B-Spline registration on a single
     (patient, frame) case, saves a 2x4 comparison figure (reference, each method's
     warped image with GT/propagated tumor contours, and each method's EPE error
     map) to `outputs/comparison_<patient>_<frame>.png`, and exports the
@@ -156,9 +158,9 @@ def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, devi
         "voxelmorph", vxm_checkpoint, case["loader"], device
     )
 
-    print("Running TransMorph")
-    pred_dvf_tm, mask_tm = run_dl_model(
-        "transmorph", tm_checkpoint, case["loader"], device
+    print("Running CNNTransformerSVF2D")
+    pred_dvf_proposal, mask_proposal = run_dl_model(
+        "cnn_transformer_svf_2d", proposal_checkpoint, case["loader"], device
     )
 
     print("Running classical B-Spline registration")
@@ -167,7 +169,12 @@ def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, devi
 
     methods = [
         ("voxelmorph", "VoxelMorph (CNN)", pred_dvf_vxm, mask_vxm),
-        ("transmorph", "TransMorph (ViT)", pred_dvf_tm, mask_tm),
+        (
+            "cnn_transformer_svf_2d",
+            "CNNTransformerSVF2D",
+            pred_dvf_proposal,
+            mask_proposal,
+        ),
         ("classical", "Classical (B-Spline)", pred_dvf_classical, mask_classical),
     ]
 
@@ -216,14 +223,16 @@ def generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, devi
     print(f"Exports .mha saved in {export_dir}")
 
 
-def main(cases, vxm_checkpoint, tm_checkpoint):
+def main(cases, vxm_checkpoint, proposal_checkpoint):
     """Generates a comparison figure for each "patient:frame" string in `cases`."""
     device = get_device()
     print(f"Using device: {device}")
 
     for case_str in cases:
         patient, frame = case_str.split(":")
-        generate_figure_for_case(patient, frame, vxm_checkpoint, tm_checkpoint, device)
+        generate_figure_for_case(
+            patient, frame, vxm_checkpoint, proposal_checkpoint, device
+        )
 
 
 if __name__ == "__main__":
@@ -241,10 +250,10 @@ if __name__ == "__main__":
         default="nested_cv/voxelmorph/best_model/best_model.pt",
     )
     parser.add_argument(
-        "--tm-checkpoint",
+        "--proposal-checkpoint",
         type=str,
-        default="nested_cv/transmorph/best_model/best_model.pt",
+        default="nested_cv/cnn_transformer_svf_2d/best_model/best_model.pt",
     )
     args = parser.parse_args()
 
-    main(args.cases, args.vxm_checkpoint, args.tm_checkpoint)
+    main(args.cases, args.vxm_checkpoint, args.proposal_checkpoint)

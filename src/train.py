@@ -2,6 +2,7 @@
 Training loop, and computational cost benchmark
 """
 
+import logging
 import time
 
 import numpy as np
@@ -10,15 +11,17 @@ import torch.optim as optim
 
 from config import (
     LEARNING_RATE, N_EPOCHS, PATIENCE, SCHEDULER_FACTOR, SCHEDULER_PATIENCE,
-    GRAD_CLIP_MAX_NORM, LAMBDA_DVF, LAMBDA_SMOOTH, CHECKPOINT_DIR, LAMBDA_KL,
+    GRAD_CLIP_MAX_NORM, LAMBDA_DVF, LAMBDA_SMOOTH, CHECKPOINT_DIR,
 )
 from src.losses import Loss
+
+LOGGER = logging.getLogger("mri_alignment")
 
 
 def train_model(model, train_loader, val_loader, device,
                  checkpoint_name="best_model.pt",
                  n_epochs=N_EPOCHS, lr=LEARNING_RATE, patience=PATIENCE,
-                 lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH, lambda_kl=LAMBDA_KL,
+                 lambda_dvf=LAMBDA_DVF, lambda_smooth=LAMBDA_SMOOTH,
                  scheduler_factor=SCHEDULER_FACTOR, scheduler_patience=SCHEDULER_PATIENCE,
                  grad_clip_max_norm=GRAD_CLIP_MAX_NORM, epoch_callback=None, log_prefix=""):
     """
@@ -58,10 +61,10 @@ def train_model(model, train_loader, val_loader, device,
     for epoch in range(n_epochs):
         epoch_start = time.perf_counter()
 
-        train_metrics = _run_epoch(model, train_loader, device, lambda_dvf, lambda_smooth, lambda_kl,
+        train_metrics = _run_epoch(model, train_loader, device, lambda_dvf, lambda_smooth,
                                     optimizer=optimizer, grad_clip_max_norm=grad_clip_max_norm)
 
-        val_metrics = _run_epoch(model, val_loader, device, lambda_dvf, lambda_smooth, lambda_kl, optimizer=None)
+        val_metrics = _run_epoch(model, val_loader, device, lambda_dvf, lambda_smooth, optimizer=None)
 
         epoch_time = time.perf_counter() - epoch_start
 
@@ -76,27 +79,28 @@ def train_model(model, train_loader, val_loader, device,
         if epoch_callback is not None:
             epoch_callback(epoch, val_metrics)
 
-        print(f"{log_prefix}Epoch {epoch + 1}/{n_epochs} ({epoch_time:.1f}s)")
-        print(f"{log_prefix}  train -> loss: {train_metrics['loss']:.4f} | epe: {train_metrics['epe']:.4f} "
-              f"| smooth: {train_metrics['smooth']:.4f}")
-        print(f"{log_prefix}  val   -> loss: {val_metrics['loss']:.4f} | epe: {val_metrics['epe']:.4f} "
-              f"| smooth: {val_metrics['smooth']:.4f}")
+        LOGGER.info(
+            "%sepoch=%d/%d train_loss=%.4f val_loss=%.4f val_epe=%.4f "
+            "lr=%.3g epoch_time=%.1fs",
+            log_prefix, epoch + 1, n_epochs, train_metrics["loss"],
+            val_metrics["loss"], val_metrics["epe"],
+            optimizer.param_groups[0]["lr"], epoch_time,
+        )
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             patience_counter = 0
             torch.save(model.state_dict(), checkpoint_path)
-            print(f"{log_prefix}  -> best model (val_loss={val_metrics['loss']:.4f})")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"{log_prefix}  -> early stopping (patience={patience})")
+                LOGGER.info("%searly_stopping patience=%d", log_prefix, patience)
                 break
 
     return history, checkpoint_path
 
 
-def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, lambda_kl, optimizer=None, grad_clip_max_norm=None):
+def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, optimizer=None, grad_clip_max_norm=None):
     """Runs a train or validation (if optimizer is None) epoch"""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
@@ -106,10 +110,10 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, lambda_kl, opti
 
     with context:
         for img_fixed, img_moving, gt_dvf, meta in loader:
-            img_fixed = img_fixed.to(device).float()
-            img_moving = img_moving.to(device).float()
-            gt_dvf = gt_dvf.to(device).float()
-            mask = meta["anatomy_mask"].to(device).float()
+            img_fixed = img_fixed.to(device, non_blocking=True).float()
+            img_moving = img_moving.to(device, non_blocking=True).float()
+            gt_dvf = gt_dvf.to(device, non_blocking=True).float()
+            mask = meta["anatomy_mask"].to(device, non_blocking=True).float()
 
             if is_train:
                 optimizer.zero_grad()
@@ -120,15 +124,9 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, lambda_kl, opti
             loss_fn = Loss(pred_dvf, gt_dvf, mask, lambda_dvf=lambda_dvf, lambda_smooth=lambda_smooth)
             loss, parts = loss_fn.total_loss()
 
-            kl = getattr(model, "last_kl_loss", None)
-
-            if kl is not None:
-                loss = loss + lambda_kl * kl
-                parts['kl'] = kl.item()
-
             if is_train:
                 if torch.isnan(loss):
-                    print("  NaN loss, discarding batch")
+                    LOGGER.warning("NaN loss; discarding batch")
                     continue
                 loss.backward()
                 if grad_clip_max_norm is not None:
@@ -143,7 +141,8 @@ def _run_epoch(model, loader, device, lambda_dvf, lambda_smooth, lambda_kl, opti
     return {k: v / n for k, v in running.items()}
 
 
-def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=10, n_runs=50):
+def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=10,
+                    n_runs=50, log_prefix=""):
     """
     Measures the inference time, parameters number, and GPU memory peak of
     a trained model. `sample_fixed`/`sample_moving` must be tensors (1, 1, H, W)
@@ -191,10 +190,10 @@ def benchmark_model(model, sample_fixed, sample_moving, device="cuda", n_warmup=
         "peak_memory_mb": peak_memory_mb,
     }
 
-    print(f"Total params: {n_params:,} ({n_params_trainable:,} trainable)")
-    print(f"Inference time: {results['inference_time_ms_mean']:.2f} ± {results['inference_time_ms_std']:.2f} ms")
-    print(f"FPS equivalente: {results['fps']:.2f}")
+    LOGGER.info("%sparams=%d trainable_params=%d inference_time=%.2fms fps=%.2f",
+                log_prefix, n_params, n_params_trainable,
+                results["inference_time_ms_mean"], results["fps"])
     if peak_memory_mb is not None:
-        print(f"GPU memory peak: {peak_memory_mb:.1f} MB")
+        LOGGER.info("%sgpu_peak_memory=%.1fMB", log_prefix, peak_memory_mb)
 
     return results

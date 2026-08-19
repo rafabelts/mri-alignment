@@ -32,7 +32,9 @@ VXM_SRC_FEATS = 1
 VXM_TRG_FEATS = 1
 
 # --- Training ---
-BATCH_SIZE = 16
+BATCH_SIZE = 8
+NUM_WORKERS = 1
+USE_AMP = False  # GTX 1070 (Pascal): optional AMP support must remain opt-in.
 LEARNING_RATE = 1e-4
 N_EPOCHS = 100
 PATIENCE = 10
@@ -44,8 +46,6 @@ GRAD_CLIP_MAX_NORM = 1.0
 LAMBDA_DVF = 1.0
 LAMBDA_SMOOTH = 0.1
 CHARBONNIER_EPS = 1e-3
-
-LAMBDA_KL = 0.001
 
 # --- Device ---
 DEVICE = "cuda"  # it resolves automatially to cpu if theres no GPU (see src/utils.py)

@@ -1,6 +1,4 @@
-"""
-Definition/Construction for register models. 
-"""
+"""Construction and checkpoint loading for the registration models."""
 
 import src.compat
 import voxelmorph as vxm
@@ -14,7 +12,7 @@ def build_model(model_name, device, inshape=None, int_steps=None):
     Parameters
     ----------
     model_name : str
-        'voxelmorph' or 'transmorph'.
+        'voxelmorph' or 'cnn_transformer_svf_2d'.
     device : str
         'cuda' or 'cpu'.
     inshape : tuple[int, int], optional
@@ -37,8 +35,8 @@ def build_model(model_name, device, inshape=None, int_steps=None):
 
     if model_name == 'voxelmorph':
         return _build_voxelmorph(device, **kwargs)
-    elif model_name == 'transmorph':
-        return _build_transmorph(device, **kwargs)
+    elif model_name == 'cnn_transformer_svf_2d':
+        return _build_cnn_transformer_svf_2d(device, **kwargs)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -59,10 +57,20 @@ def _build_voxelmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS,
     ).to(device)
     return model
 
-def _build_transmorph(device, inshape=VXM_INSHAPE, int_steps=VXM_INT_STEPS, int_downsize=VXM_INT_DOWNSIZE):
-    """Builds a TransMorphDiff instance (see src/transmorph.py)."""
-    from src.transmorph import TransMorphDiff
-    model = TransMorphDiff(inshape=inshape, int_steps=int_steps, int_downsize=int_downsize).to(device)
+def _build_cnn_transformer_svf_2d(
+    device,
+    inshape=VXM_INSHAPE,
+    int_steps=VXM_INT_STEPS,
+    int_downsize=VXM_INT_DOWNSIZE,
+):
+    """Build the lightweight deterministic CNN--Transformer SVF model."""
+    from src.proposal import CNNTransformerSVF2D
+
+    model = CNNTransformerSVF2D(
+        inshape=inshape,
+        int_steps=int_steps,
+        int_downsize=int_downsize,
+    ).to(device)
     return model
 
 def load_weights_any_shape(model, state_dict_path, device):

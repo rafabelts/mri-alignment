@@ -1,16 +1,16 @@
 """
-Nested cross-validation with an Optuna-driven hyperparameter search, for
-VoxelMorph/TransMorph.
+Nested cross-validation with an Optuna-driven hyperparameter search for
+VoxelMorph and CNNTransformerSVF2D.
 
 Design:
     outer_k=5, inner_k=3
-    search space: learning_rate, lambda_smooth, vxm_int_steps, batch_size
-                  (+ lambda_kl for TransMorph only); lambda_dvf fixed at 1.0
+    search space: learning_rate, lambda_smooth, int_steps;
+                  lambda_dvf fixed at 1.0
     TRIAL_BUDGET Optuna trials per outer fold, pruned via inner_fold_0's
         per-epoch val loss (MedianPruner)
     final refits: 3 seeds per outer fold, 50 epochs (diminishing-returns
         point read off the val-loss curves, not early stopping)
-    tie-break metric: Dice, computed once after training (not per epoch)
+    clinical selection metric: TRE (mm), computed once after training (not per epoch)
 
 Every unit of work writes its own result file under outputs/nested_cv/<model>/
 right after it finishes (the Optuna study itself is the persistence layer for
@@ -19,15 +19,15 @@ an interrupted run can just be restarted with the same command.
 
 Usage:
     uv run python scripts/nested_cv.py --model voxelmorph
-    uv run python scripts/nested_cv.py --model transmorph
+    uv run python scripts/nested_cv.py --model cnn_transformer_svf_2d --devices cuda:1
     uv run python scripts/nested_cv.py --model voxelmorph --plot-only
-    uv run python scripts/nested_cv.py --model voxelmorph --devices cuda:0,cuda:1  # search stage splits trials across both
+    uv run python scripts/nested_cv.py --model voxelmorph --devices cuda:0
 """
 
 import argparse
 import json
 import os
-import queue
+import logging
 import shutil
 import sys
 from collections import Counter
@@ -52,12 +52,13 @@ from src.train import benchmark_model, train_model
 from src.utils import get_device, set_seed
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+LOGGER = logging.getLogger("mri_alignment")
 
 # --- Nested CV design ---
 OUTER_K = 5
 INNER_K = 3
-TRIAL_BUDGET = 30
-SEARCH_EPOCH_CAP = 15
+TRIAL_BUDGET = 15
+SEARCH_EPOCH_CAP = 10
 FINAL_EPOCHS = 50
 N_SEEDS = 3
 SEARCH_SEED = 0
@@ -66,21 +67,16 @@ INTERNAL_VAL_FRACTION = 0.15
 
 # --- search space ---
 LR_RANGE = (1e-5, 1e-3)
-LAMBDA_SMOOTH_RANGE = (0.01, 1.0)
-VXM_INT_STEPS_RANGE = (3, 10)
-BATCH_SIZE_CHOICES = [8, 16, 32]
-LAMBDA_KL_RANGE = (1e-4, 1e-1)  # TransMorph only
+LAMBDA_SMOOTH_RANGE = (1e-3, 1e-1)
+INT_STEPS_CHOICES = [5, 7]
 
 
 def suggest_theta(trial, model_name):
     theta = {
-        "lr": trial.suggest_float("lr", *LR_RANGE, log=True),
+        "learning_rate": trial.suggest_float("learning_rate", *LR_RANGE, log=True),
         "lambda_smooth": trial.suggest_float("lambda_smooth", *LAMBDA_SMOOTH_RANGE, log=True),
-        "vxm_int_steps": trial.suggest_int("vxm_int_steps", *VXM_INT_STEPS_RANGE),
-        "batch_size": trial.suggest_categorical("batch_size", BATCH_SIZE_CHOICES),
+        "int_steps": trial.suggest_categorical("int_steps", INT_STEPS_CHOICES),
     }
-    if model_name == "transmorph":
-        theta["lambda_kl"] = trial.suggest_float("lambda_kl", *LAMBDA_KL_RANGE, log=True)
     return theta
 
 
@@ -103,7 +99,15 @@ def subset_by_patients(ram_fixed, ram_moving, ram_dvf, ram_meta, subdirs):
 
 def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle, batch_size=config.BATCH_SIZE):
     dataset = MRICineDataset(ram_fixed, ram_moving, ram_dvf, ram_meta)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": config.NUM_WORKERS,
+        "pin_memory": config.NUM_WORKERS > 0,
+    }
+    if config.NUM_WORKERS > 0:
+        kwargs.update(persistent_workers=True, prefetch_factor=2)
+    return DataLoader(dataset, **kwargs)
 
 
 def internal_train_val_split(
@@ -127,11 +131,14 @@ def internal_train_val_split(
         )
 
 
-def evaluate_dice(model, loader, ram_fixed, ram_moving, ram_meta, device):
+def evaluate_tre(model, loader, ram_fixed, ram_moving, ram_meta, device):
+    """Return mean target TRE in physical mm, or +inf if none is finite."""
     results = inference_with_reconstruction(model, loader, device=device)
     metric = EvaluationMetric(results, ram_fixed, ram_moving, build_lookup(ram_meta))
-    dice_list, _, _ = metric.evaluate_segmentation(ram_meta)
-    return float(np.nanmean(dice_list))
+    _, tre_list, _ = metric.evaluate_segmentation(ram_meta)
+    finite_tre = np.asarray(tre_list, dtype=float)
+    finite_tre = finite_tre[np.isfinite(finite_tre)]
+    return float(np.nanmean(finite_tre)) if finite_tre.size else float("inf")
 
 
 def evaluate_full(model, loader, ram_fixed, ram_moving, ram_meta, device):
@@ -141,14 +148,14 @@ def evaluate_full(model, loader, ram_fixed, ram_moving, ram_meta, device):
     results = inference_with_reconstruction(model, loader, device=device)
     metric = EvaluationMetric(results, ram_fixed, ram_moving, build_lookup(ram_meta))
     epe_list, jac_list, ssim_list = metric.evaluate_reconstructed(ram_meta)
-    dice_list, tre_list, hd_list = metric.evaluate_segmentation(ram_meta)
+    dice_list, tre_list, hd95_list = metric.evaluate_segmentation(ram_meta)
     summary = {
         "epe": float(np.nanmean(epe_list)),
         "jacobian": float(np.nanmean(jac_list)),
         "ssim": float(np.nanmean(ssim_list)),
         "dice": float(np.nanmean(dice_list)),
         "tre": float(np.nanmean(tre_list)),
-        "hausdorff": float(np.nanmean(hd_list)),
+        "hd95": float(np.nanmean(hd95_list)),
     }
     return summary, metric
 
@@ -162,7 +169,7 @@ def save_per_case_csv(metric, path):
         rows.append({
             "seq_id": seq_id, "frame_idx": frame_idx,
             "epe": rec.get("epe"), "jacobian": rec.get("jacobian"), "ssim": rec.get("ssim"),
-            "dice": seg.get("dice"), "tre": seg.get("tre"), "hausdorff": seg.get("hausdorff"),
+            "dice": seg.get("dice"), "tre": seg.get("tre"), "hd95": seg.get("hd95"),
         })
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False, float_format="%.3f")
@@ -177,6 +184,26 @@ def save_json(path, data):
 def load_json(path):
     with open(path) as f:
         return json.load(f)
+
+
+def configure_logging(model_name, device):
+    """One console and one model/device-specific append-only file handler."""
+    artifact = "proposed" if model_name == "cnn_transformer_svf_2d" else model_name
+    device_slug = device.replace(":", "")
+    log_dir = config.OUTPUTS_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{artifact}_{device_slug}.log"
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
+    if not LOGGER.handlers:
+        formatter = logging.Formatter("%(asctime)s %(message)s")
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(formatter)
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        LOGGER.addHandler(console)
+        LOGGER.addHandler(file_handler)
+    return log_path
 
 
 def _mode_with_tiebreak(values, default):
@@ -194,48 +221,32 @@ def aggregate_theta(thetas, model_name):
     parameters use mode.
     """
     theta_final = {
-        "lr": float(np.median([t["lr"] for t in thetas])),
+        "learning_rate": float(np.median([t["learning_rate"] for t in thetas])),
         "lambda_smooth": float(np.median([t["lambda_smooth"] for t in thetas])),
-        "vxm_int_steps": _mode_with_tiebreak(
-            [t["vxm_int_steps"] for t in thetas], default=config.VXM_INT_STEPS
-        ),
-        "batch_size": _mode_with_tiebreak(
-            [t["batch_size"] for t in thetas], default=config.BATCH_SIZE
+        "int_steps": _mode_with_tiebreak(
+            [t["int_steps"] for t in thetas], default=config.VXM_INT_STEPS
         ),
     }
-    if model_name == "transmorph":
-        theta_final["lambda_kl"] = float(np.median([t["lambda_kl"] for t in thetas]))
     return theta_final
 
 
 class NestedCVRunner:
     def __init__(self, model_name, devices):
-        """`devices`: list of device strings, e.g. ["cuda:0", "cuda:1"] or
-        ["cpu"]. The search stage runs one trial per device concurrently
-        (in-process threads sharing the same preprocessed dataset - no RAM
-        duplication). Every other stage (final refit, best-model) is
-        sequential on devices[0]."""
+        """`devices` contains exactly one device assigned to this process."""
         self.model_name = model_name
         self.devices = devices
         self.device = devices[0]
-        # a thread-safe pool, not a round-robin index: with n_jobs>1, Optuna
-        # hands the next trial to whichever worker thread frees up first, and
-        # trials finish at very different speeds (pruned trials are much
-        # faster than full ones) - so trial numbers reach workers out of
-        # order, and `trial.number % len(devices)` can hand two concurrent
-        # trials the same GPU while another sits idle. Acquiring/releasing
-        # from this queue instead ties the device strictly to "currently free",
-        # never to trial number.
-        self._device_pool = queue.Queue()
-        for d in devices:
-            self._device_pool.put(d)
-        self.results_dir = config.OUTPUTS_DIR / "nested_cv" / model_name
+        if len(devices) != 1:
+            raise ValueError("nested_cv requires exactly one device per process")
+        self.artifact_name = "proposed" if model_name == "cnn_transformer_svf_2d" else model_name
+        self.tag = "PROPOSED" if self.artifact_name == "proposed" else "VXM"
+        self.results_dir = config.OUTPUTS_DIR / "nested_cv" / self.artifact_name
         self.ram = None
 
         for sub in ["search", "theta", "final", "best_model", "plots"]:
             (self.results_dir / sub).mkdir(parents=True, exist_ok=True)
         for sub in ["search", "final", "best_model"]:
-            (config.CHECKPOINT_DIR / "nested_cv" / model_name / sub).mkdir(
+            (config.CHECKPOINT_DIR / "nested_cv" / self.artifact_name / sub).mkdir(
                 parents=True, exist_ok=True
             )
 
@@ -248,7 +259,7 @@ class NestedCVRunner:
                 if os.path.isdir(os.path.join(config.DATA_DIR, d))
             ]
         )
-        print(
+        logging.getLogger("mri_alignment").info(
             f"Preprocessing {len(all_subdirs)} patients once for the whole nested CV run..."
         )
         self.ram = preprocess_dataset(config.DATA_DIR, all_subdirs)
@@ -259,17 +270,14 @@ class NestedCVRunner:
         assert self.ram is not None, "call preprocess_all() before running search trials"
         theta = suggest_theta(trial, self.model_name)
 
-        # blocks until a GPU is free - guarantees at most len(devices) trials
-        # ever run at once, one per device, regardless of how unevenly they
-        # finish (pruned trials free their device much sooner than full ones)
-        device = self._device_pool.get()
+        device = self.device
         try:
-            dice_scores = []
+            tre_scores = []
             for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
                 train_data = subset_by_patients(*self.ram, inner_train)
                 val_data = subset_by_patients(*self.ram, inner_val)
-                train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
-                val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
+                train_loader = make_loader(*train_data, shuffle=True)
+                val_loader = make_loader(*val_data, shuffle=False)
 
                 # set_seed() reseeds torch's global RNG, which is shared across
                 # threads - under concurrent search trials this means model init
@@ -278,75 +286,94 @@ class NestedCVRunner:
                 # between configs, not bit-exact reproducibility (unlike the
                 # final-refit/best-model seeds, which stay single-threaded).
                 set_seed(SEARCH_SEED)
-                model = build_model(self.model_name, device, int_steps=theta["vxm_int_steps"])
+                model = build_model(self.model_name, device, int_steps=theta["int_steps"])
 
                 def prune_callback(epoch, val_metrics, inner_j=j):
                     if inner_j == 0:
-                        trial.report(-val_metrics["loss"], step=epoch)
+                        trial.report(val_metrics["loss"], step=epoch)
                         if trial.should_prune():
                             raise optuna.TrialPruned()
 
                 ckpt_name = (
-                    f"nested_cv/{self.model_name}/search/"
+                    f"nested_cv/{self.artifact_name}/search/"
                     f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
                 )
                 _, ckpt_path = train_model(
                     model, train_loader, val_loader, device,
                     checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
-                    lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
-                    lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
+                    lr=theta["learning_rate"], lambda_smooth=theta["lambda_smooth"],
                     epoch_callback=prune_callback,
-                    log_prefix=f"[outer{outer_i} trial{trial.number} inner{j} {device}] ",
+                    log_prefix=(f"[{self.tag}][{device}][search][outer={outer_i}]"
+                                f"[trial={trial.number}][inner={j}] "),
                 )
                 model.load_state_dict(
                     torch.load(ckpt_path, map_location=device, weights_only=True)
                 )
                 model.eval()
 
-                dice = evaluate_dice(
+                tre = evaluate_tre(
                     model, val_loader, val_data[0], val_data[1], val_data[3], device
                 )
                 ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
-                dice_scores.append(dice)
+                tre_scores.append(tre)
         finally:
-            self._device_pool.put(device)
+            torch.cuda.empty_cache()
 
-        mean_dice = float(np.mean(dice_scores))
-        print(
+        mean_tre = float(np.mean(tre_scores))
+        logging.getLogger("mri_alignment").info(
             f"[search] outer{outer_i} trial{trial.number} (device={device}) {theta} "
-            f"-> dice={mean_dice:.4f} ({len(dice_scores)}/{INNER_K} inner folds ran)"
+            f"-> mean TRE = {mean_tre:.3f} mm "
+            f"({len(tre_scores)}/{INNER_K} inner folds ran)"
         )
-        return mean_dice
+        return mean_tre
 
     def run_search_stage(self, outer_i, fold):
         theta_path = self.results_dir / "theta" / f"outer{outer_i}.json"
         if theta_path.exists():
-            return load_json(theta_path)["theta"]
+            saved = load_json(theta_path)
+            if saved.get("objective") != "mean_inner_validation_tre_mm":
+                raise RuntimeError(
+                    f"{theta_path} predates the TRE objective. Archive/remove the old "
+                    "theta file before restarting TRE-based HPO."
+                )
+            expected = {"learning_rate", "lambda_smooth", "int_steps"}
+            if set(saved.get("theta", {})) == expected:
+                return saved["theta"]
+            LOGGER.warning("Ignoring legacy theta schema at %s; new search will replace it", theta_path)
 
         storage = f"sqlite:///{self.results_dir / 'search' / f'outer{outer_i}.db'}"
         study = optuna.create_study(
-            study_name=f"{self.model_name}_outer{outer_i}",
+            # A distinct name allows legacy Dice-maximization studies to remain
+            # in the same SQLite database without a direction conflict.
+            study_name=f"{self.artifact_name}_outer{outer_i}_tre_search_v2",
             storage=storage,
             load_if_exists=True,
-            direction="maximize",
+            direction="minimize",
             sampler=optuna.samplers.TPESampler(seed=SEARCH_SEED),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
         )
         remaining = TRIAL_BUDGET - len(study.trials)
         if remaining > 0:
             study.optimize(
                 lambda trial: self._search_objective(trial, outer_i, fold),
-                n_trials=remaining, n_jobs=len(self.devices),
+                n_trials=remaining, n_jobs=1,
             )
 
         theta = study.best_params
         save_json(theta_path, {
             "outer": outer_i, "theta": theta,
+            "objective": "mean_inner_validation_tre_mm",
             "best_value": study.best_value, "n_trials": len(study.trials),
         })
-        print(
-            f"[theta] outer{outer_i} winner: {theta} "
-            f"(best inner dice={study.best_value:.4f}, {len(study.trials)} trials)"
+        states = Counter(t.state for t in study.trials)
+        logging.getLogger("mri_alignment").info(
+            "[%s][%s][search][outer=%d] COMPLETE completed_trials=%d "
+            "pruned_trials=%d best_TRE=%.3f mm best_learning_rate=%.6g "
+            "best_lambda_smooth=%.6g best_int_steps=%d",
+            self.tag, self.device, outer_i,
+            states[optuna.trial.TrialState.COMPLETE],
+            states[optuna.trial.TrialState.PRUNED], study.best_value,
+            theta["learning_rate"], theta["lambda_smooth"], theta["int_steps"],
         )
         return theta
 
@@ -358,7 +385,13 @@ class NestedCVRunner:
         assert self.ram is not None, "call preprocess_all() before running final refits"
         result_path = self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}.json"
         if result_path.exists():
-            return load_json(result_path)
+            saved = load_json(result_path)
+            if "hd95" not in saved.get("metrics", {}):
+                raise RuntimeError(
+                    f"{result_path} uses the legacy Hausdorff schema. Re-evaluate "
+                    "the checkpoint with scripts/evaluate_checkpoints.py."
+                )
+            return saved
 
         refit_train, refit_val = internal_train_val_split(outer_train_subdirs)
 
@@ -366,21 +399,21 @@ class NestedCVRunner:
         val_data = subset_by_patients(*self.ram, refit_val)
         test_data = subset_by_patients(*self.ram, outer_test_subdirs)
 
-        train_loader = make_loader(*train_data, shuffle=True, batch_size=theta["batch_size"])
-        val_loader = make_loader(*val_data, shuffle=False, batch_size=theta["batch_size"])
-        test_loader = make_loader(*test_data, shuffle=False, batch_size=theta["batch_size"])
+        train_loader = make_loader(*train_data, shuffle=True)
+        val_loader = make_loader(*val_data, shuffle=False)
+        test_loader = make_loader(*test_data, shuffle=False)
 
         set_seed(seed)
-        model = build_model(self.model_name, self.device, int_steps=theta["vxm_int_steps"])
+        model = build_model(self.model_name, self.device, int_steps=theta["int_steps"])
         ckpt_name = (
-            f"nested_cv/{self.model_name}/final/outer{outer_i}_seed{seed_idx}.pt"
+            f"nested_cv/{self.artifact_name}/final/outer{outer_i}_seed{seed_idx}.pt"
         )
         history, ckpt_path = train_model(
             model, train_loader, val_loader, self.device,
             checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
-            lr=theta["lr"], lambda_smooth=theta["lambda_smooth"],
-            lambda_kl=theta.get("lambda_kl", config.LAMBDA_KL),
-            log_prefix=f"[final outer{outer_i} seed{seed_idx}] ",
+            lr=theta["learning_rate"], lambda_smooth=theta["lambda_smooth"],
+            patience=FINAL_EPOCHS + 1,
+            log_prefix=f"[{self.tag}][{self.device}][final][outer={outer_i}][seed={seed_idx}] ",
         )
         model.load_state_dict(
             torch.load(ckpt_path, map_location=self.device, weights_only=True)
@@ -397,9 +430,12 @@ class NestedCVRunner:
         # theta (batch_size, vxm_int_steps can differ per outer fold), so
         # it's not redundant to measure it again for each one
         sample_fixed, sample_moving, _, _ = next(iter(test_loader))
-        sample_fixed = sample_fixed[:1].to(self.device).float()
-        sample_moving = sample_moving[:1].to(self.device).float()
-        benchmark = benchmark_model(model, sample_fixed, sample_moving, device=self.device)
+        sample_fixed = sample_fixed[:1].to(self.device, non_blocking=True).float()
+        sample_moving = sample_moving[:1].to(self.device, non_blocking=True).float()
+        benchmark = benchmark_model(
+            model, sample_fixed, sample_moving, device=self.device,
+            log_prefix=f"[{self.tag}][{self.device}][final][outer={outer_i}][seed={seed_idx}] ",
+        )
 
         result = {
             "outer": outer_i,
@@ -419,7 +455,10 @@ class NestedCVRunner:
         save_per_case_csv(
             metric, self.results_dir / "final" / f"outer{outer_i}_seed{seed_idx}_per_case.csv"
         )
-        print(f"[final] outer{outer_i} seed{seed_idx}({seed}) -> {metrics}")
+        logging.getLogger("mri_alignment").info(
+            "[%s][%s][final][outer=%d][seed=%d] metrics=%s",
+            self.tag, self.device, outer_i, seed_idx, metrics,
+        )
         return result
 
     def run_outer_fold(self, outer_i, fold):
@@ -438,7 +477,13 @@ class NestedCVRunner:
         )
         result_path = self.results_dir / "best_model" / "summary.json"
         if result_path.exists():
-            return load_json(result_path)
+            saved = load_json(result_path)
+            if "internal_val_tre" not in saved.get("chosen", {}):
+                raise RuntimeError(
+                    f"{result_path} uses Dice-based seed selection. Archive/remove "
+                    "the legacy best_model JSON files and rerun this stage."
+                )
+            return saved
 
         thetas = [
             load_json(self.results_dir / "theta" / f"outer{i}.json")["theta"]
@@ -454,40 +499,46 @@ class NestedCVRunner:
 
         train_data = subset_by_patients(*self.ram, full_train)
         val_data = subset_by_patients(*self.ram, full_val)
-        train_loader = make_loader(*train_data, shuffle=True, batch_size=theta_final["batch_size"])
-        val_loader = make_loader(*val_data, shuffle=False, batch_size=theta_final["batch_size"])
+        train_loader = make_loader(*train_data, shuffle=True)
+        val_loader = make_loader(*val_data, shuffle=False)
 
         candidates = []
         for seed_idx, seed in enumerate(seeds_for(N_SEEDS)):
             cand_path = self.results_dir / "best_model" / f"seed{seed_idx}.json"
             if cand_path.exists():
-                candidates.append(load_json(cand_path))
+                saved = load_json(cand_path)
+                if "internal_val_tre" not in saved:
+                    raise RuntimeError(
+                        f"{cand_path} uses Dice-based seed selection. Archive/remove "
+                        "the legacy candidate JSON files and rerun this stage."
+                    )
+                candidates.append(saved)
                 continue
 
             set_seed(seed)
             model = build_model(
-                self.model_name, self.device, int_steps=theta_final["vxm_int_steps"]
+                self.model_name, self.device, int_steps=theta_final["int_steps"]
             )
-            ckpt_name = f"nested_cv/{self.model_name}/best_model/seed{seed_idx}.pt"
+            ckpt_name = f"nested_cv/{self.artifact_name}/best_model/seed{seed_idx}.pt"
             history, ckpt_path = train_model(
                 model, train_loader, val_loader, self.device,
                 checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
-                lr=theta_final["lr"], lambda_smooth=theta_final["lambda_smooth"],
-                lambda_kl=theta_final.get("lambda_kl", config.LAMBDA_KL),
-                log_prefix=f"[best_model seed{seed_idx}] ",
+                lr=theta_final["learning_rate"], lambda_smooth=theta_final["lambda_smooth"],
+                patience=FINAL_EPOCHS + 1,
+                log_prefix=f"[{self.tag}][{self.device}][best_model][seed={seed_idx}] ",
             )
             model.load_state_dict(
                 torch.load(ckpt_path, map_location=self.device, weights_only=True)
             )
             model.eval()
-            dice = evaluate_dice(
+            tre = evaluate_tre(
                 model, val_loader, val_data[0], val_data[1], val_data[3], self.device
             )
 
             cand = {
                 "seed_idx": seed_idx,
                 "seed": seed,
-                "internal_val_dice": dice,
+                "internal_val_tre": tre,
                 "checkpoint": str(ckpt_path),
             }
             save_json(cand_path, cand)
@@ -497,14 +548,14 @@ class NestedCVRunner:
             )
             candidates.append(cand)
             print(
-                f"[best_model] seed{seed_idx}({seed}) -> internal val dice={dice:.4f}"
+                f"[best_model] seed{seed_idx}({seed}) -> internal val TRE={tre:.3f} mm"
             )
 
-        best = max(candidates, key=lambda c: c["internal_val_dice"])
+        best = min(candidates, key=lambda c: c["internal_val_tre"])
         selected_path = (
             config.CHECKPOINT_DIR
             / "nested_cv"
-            / self.model_name
+            / self.artifact_name
             / "best_model"
             / "best_model.pt"
         )
@@ -529,26 +580,68 @@ class NestedCVRunner:
             return
 
         records = [load_json(f) for f in final_results]
-        dice = [r["metrics"]["dice"] for r in records]
-        tre = [r["metrics"]["tre"] for r in records]
-        hd = [r["metrics"]["hausdorff"] for r in records]
+        detail_rows = [{
+            "model": self.model_name, "outer_fold": r["outer"], "seed": r["seed"],
+            "tre_mm": r["metrics"]["tre"], "dvf_epe_mm": r["metrics"]["epe"],
+            "dice": r["metrics"]["dice"], "hd95_mm": r["metrics"]["hd95"],
+            "negative_jacobian_pct": r["metrics"]["jacobian"],
+            "ssim": r["metrics"]["ssim"],
+            "inference_time_ms": r["benchmark"]["inference_time_ms_mean"],
+            "fps": r["benchmark"]["fps"],
+        } for r in records]
+        pd.DataFrame(detail_rows).to_csv(
+            self.results_dir / "detailed_outer_fold_seed_results.csv",
+            index=False, float_format="%.3f",
+        )
+
+        metric_columns = [
+            "tre_mm", "dvf_epe_mm", "dice", "hd95_mm",
+            "negative_jacobian_pct", "ssim", "inference_time_ms", "fps",
+        ]
+        detail_df = pd.DataFrame(detail_rows)
+        fold_df = (
+            detail_df.groupby(["model", "outer_fold"], as_index=False)
+            .agg(
+                n_seeds=("seed", "nunique"),
+                **{column: (column, "mean") for column in metric_columns},
+            )
+            .sort_values("outer_fold")
+        )
+        fold_path = self.results_dir / "fold_summary.csv"
+        fold_df.to_csv(fold_path, index=False, float_format="%.3f")
+
+        global_row = {"model": self.model_name, "n_outer_folds": len(fold_df)}
+        for column in metric_columns:
+            global_row[f"{column}_mean"] = float(np.nanmean(fold_df[column]))
+            global_row[f"{column}_std"] = float(np.nanstd(fold_df[column]))
+        global_path = self.results_dir / "global_summary.csv"
+        pd.DataFrame([global_row]).to_csv(
+            global_path, index=False, float_format="%.3f"
+        )
+        print(f"Saved fold-level summary: {fold_path}")
+        print(f"Saved global fold-aggregated summary: {global_path}")
+
+        dice = fold_df["dice"].tolist()
+        tre = fold_df["tre_mm"].tolist()
+        hd95 = fold_df["hd95_mm"].tolist()
 
         print(
-            f"\n=== Pooled outer-test metrics ({self.model_name}, n={len(records)}) ==="
+            f"\n=== Outer-test metrics ({self.model_name}; seeds averaged within fold, "
+            f"n={len(dice)} folds) ==="
         )
         print(f"Dice: {np.mean(dice):.4f} +/- {np.std(dice):.4f}")
         print(f"TRE (mm): {np.mean(tre):.4f} +/- {np.std(tre):.4f}")
-        print(f"Hausdorff (mm): {np.mean(hd):.4f} +/- {np.std(hd):.4f}")
+        print(f"HD95 (mm): {np.mean(hd95):.4f} +/- {np.std(hd95):.4f}")
 
         plots_dir = self.results_dir / "plots"
-        self._violin_plot(dice, tre, hd, plots_dir)
+        self._violin_plot(dice, tre, hd95, plots_dir)
         self._convergence_plot(records, plots_dir)
         self._best_model_plot(plots_dir)
 
-    def _violin_plot(self, dice, tre, hd, plots_dir):
+    def _violin_plot(self, dice, tre, hd95, plots_dir):
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
         for ax, values, title in zip(
-            axes, [dice, tre, hd], ["Dice", "TRE (mm)", "Hausdorff (mm)"]
+            axes, [dice, tre, hd95], ["Dice", "TRE (mm)", "HD95 (mm)"]
         ):
             ax.violinplot([values], showmeans=True, showextrema=True)
             ax.set_xticks([1])
@@ -638,11 +731,26 @@ class NestedCVRunner:
 
 def main(args):
     devices = args.devices.split(",") if args.devices else [get_device()]
-    print(f"Using device(s): {devices}")
-    print(
-        f"Design: outer_k={OUTER_K} inner_k={INNER_K} trial_budget={TRIAL_BUDGET} "
-        f"search_cap={SEARCH_EPOCH_CAP} seeds={N_SEEDS} final_epochs={FINAL_EPOCHS}"
-    )
+    if len(devices) != 1:
+        raise SystemExit("Exactly one --devices value is required; internal GPU parallelism is disabled")
+    device = devices[0]
+    if torch.device(device).type == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit(f"CUDA is unavailable; cannot run on {device}")
+        index = torch.device(device).index or 0
+        if index >= torch.cuda.device_count():
+            raise SystemExit(f"Requested {device}, but only {torch.cuda.device_count()} CUDA device(s) exist")
+        torch.cuda.set_device(index)
+        # Fixed-size patches benefit from cuDNN autotuning. This can cause small
+        # numerical differences and therefore is not bit-exact reproducible.
+        torch.backends.cudnn.benchmark = True
+    log_path = configure_logging(args.model, device)
+    LOGGER.info("[%s][%s][startup] outer_k=%d inner_k=%d trials=%d search_epochs=%d "
+                "final_epochs=%d seeds=%d batch_size=%d num_workers=%d use_amp=%s log=%s",
+                "PROPOSED" if args.model == "cnn_transformer_svf_2d" else "VXM",
+                device, OUTER_K, INNER_K, TRIAL_BUDGET, SEARCH_EPOCH_CAP,
+                FINAL_EPOCHS, N_SEEDS, config.BATCH_SIZE, config.NUM_WORKERS,
+                config.USE_AMP, log_path)
 
     runner = NestedCVRunner(args.model, devices)
     folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
@@ -660,7 +768,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", type=str, choices=["voxelmorph", "transmorph"], required=True
+        "--model",
+        type=str,
+        choices=["voxelmorph", "cnn_transformer_svf_2d"],
+        required=True,
     )
     parser.add_argument(
         "--plot-only",
@@ -671,9 +782,6 @@ if __name__ == "__main__":
         "--devices",
         type=str,
         default=None,
-        help="Comma-separated, e.g. 'cuda:0,cuda:1' or 'cpu' - defaults to a single "
-             "auto-detected device. With more than one, the search stage runs one "
-             "trial per device concurrently (in-process threads, one shared "
-             "preprocessed dataset - no extra RAM cost per device).",
+        help="Exactly one process-local device, e.g. 'cuda:0', 'cuda:1', or 'cpu'.",
     )
     main(parser.parse_args())

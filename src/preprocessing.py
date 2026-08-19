@@ -1,19 +1,21 @@
 """
 Data preprocessing: .mha file lecture, normalization, anatomy mask generation,
-padding, and patches extraction for images bigger than model objective size. 
+padding, and patches extraction for images bigger than model objective size.
 """
 
-import os
 import glob
+import os
 
 import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import binary_closing, binary_fill_holes
 
-from config import TARGET_SIZE, EPSILON_BG
+from config import EPSILON_BG, TARGET_SIZE
 
 
-def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EPSILON_BG):
+def preprocess_dataset(
+    root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EPSILON_BG
+):
     """
     Reads the .mha files of each patient and returns numpy array lists with its
     metadata, ready to be wrapped in a PyTorch Dataset.
@@ -64,32 +66,60 @@ def preprocess_dataset(root_dir, subdirs, target_size=TARGET_SIZE, epsilon_bg=EP
             if not os.path.exists(dvf_path):
                 continue
 
-            (img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta,
-                anatomy_mask_raw, norm_stats, spatial_meta) = _read_and_process_frame(
-                root_dir, subdir, fix_img_path, moving_img_path, dvf_path, frame_idx, target_size, epsilon_bg
+            (
+                img_fixed_np,
+                img_moving_np,
+                dvf_np,
+                seg_fixed_np,
+                seg_moving_np,
+                h,
+                w,
+                pad_meta,
+                anatomy_mask_raw,
+                norm_stats,
+                spatial_meta,
+            ) = _read_and_process_frame(
+                root_dir,
+                subdir,
+                fix_img_path,
+                moving_img_path,
+                dvf_path,
+                frame_idx,
+                target_size,
+                epsilon_bg,
             )
 
             fixed_list.append(img_fixed_np)
             moving_list.append(img_moving_np)
             dvf_list.append(dvf_np)
 
-            metadata_list.append({
-                "seq_id": subdir,
-                "frame_idx": frame_idx,
-                "original_shape": (h, w),
-                "padding_info": pad_meta,
-                "anatomy_mask": anatomy_mask_raw,
-                "seg_fixed": seg_fixed_np,
-                "seg_moving": seg_moving_np,
-                "norm_stats": norm_stats,
-                "spatial_meta": spatial_meta,
-            })
+            metadata_list.append(
+                {
+                    "seq_id": subdir,
+                    "frame_idx": frame_idx,
+                    "original_shape": (h, w),
+                    "padding_info": pad_meta,
+                    "anatomy_mask": anatomy_mask_raw,
+                    "seg_fixed": seg_fixed_np,
+                    "seg_moving": seg_moving_np,
+                    "norm_stats": norm_stats,
+                    "spatial_meta": spatial_meta,
+                }
+            )
 
     return fixed_list, moving_list, dvf_list, metadata_list
 
 
-def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf_path,
-                             frame_idx, target_size, epsilon_bg):
+def _read_and_process_frame(
+    root_dir,
+    subdir,
+    fix_img_path,
+    moving_img_path,
+    dvf_path,
+    frame_idx,
+    target_size,
+    epsilon_bg,
+):
     """Reads and preprocesses a single pair (fixed, moving, dvf) + its segmentation"""
 
     sitk_fixed = sitk.ReadImage(fix_img_path)
@@ -111,19 +141,24 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
     seg_moving_path = os.path.join(seg_dir, f"seg_{frame_idx}.mha")
 
     if os.path.exists(seg_fixed_path) and os.path.exists(seg_moving_path):
-        seg_fixed_np = sitk.GetArrayFromImage(sitk.ReadImage(seg_fixed_path)).squeeze(0).astype(np.uint8)
-        seg_moving_np = sitk.GetArrayFromImage(sitk.ReadImage(seg_moving_path)).squeeze(0).astype(np.uint8)
+        seg_fixed_np = (
+            sitk.GetArrayFromImage(sitk.ReadImage(seg_fixed_path))
+            .squeeze(0)
+            .astype(np.uint8)
+        )
+        seg_moving_np = (
+            sitk.GetArrayFromImage(sitk.ReadImage(seg_moving_path))
+            .squeeze(0)
+            .astype(np.uint8)
+        )
     else:
         seg_fixed_np, seg_moving_np = None, None
 
     # anatomy mask: only excludes real background (~0), not actually dark tissues
     anatomy_mask_raw = (img_fixed_np > epsilon_bg).astype(np.uint8)
-    anatomy_mask_raw = binary_closing(anatomy_mask_raw, structure=np.ones((5, 5))).astype(np.uint8)
-    anatomy_mask_raw = binary_fill_holes(anatomy_mask_raw).astype(np.uint8)
-
-    # anatomy mask: only excludes real background (~0), not actually dark tissues
-    anatomy_mask_raw = (img_fixed_np > epsilon_bg).astype(np.uint8)
-    anatomy_mask_raw = binary_closing(anatomy_mask_raw, structure=np.ones((5, 5))).astype(np.uint8)
+    anatomy_mask_raw = binary_closing(
+        anatomy_mask_raw, structure=np.ones((5, 5))
+    ).astype(np.uint8)
     anatomy_mask_raw = binary_fill_holes(anatomy_mask_raw).astype(np.uint8)
 
     # normalization stats before applying it
@@ -148,22 +183,47 @@ def _read_and_process_frame(root_dir, subdir, fix_img_path, moving_img_path, dvf
         top, bottom = pad_h // 2, pad_h - pad_h // 2
         left, right = pad_w // 2, pad_w - pad_w // 2
 
-        img_fixed_np = np.pad(img_fixed_np, ((top, bottom), (left, right)), mode="constant")
-        img_moving_np = np.pad(img_moving_np, ((top, bottom), (left, right)), mode="constant")
+        img_fixed_np = np.pad(
+            img_fixed_np, ((top, bottom), (left, right)), mode="constant"
+        )
+        img_moving_np = np.pad(
+            img_moving_np, ((top, bottom), (left, right)), mode="constant"
+        )
         dvf_np = np.pad(dvf_np, ((top, bottom), (left, right), (0, 0)), mode="constant")
-        anatomy_mask_raw = np.pad(anatomy_mask_raw, ((top, bottom), (left, right)), mode="constant")
+        anatomy_mask_raw = np.pad(
+            anatomy_mask_raw, ((top, bottom), (left, right)), mode="constant"
+        )
 
-        pad_meta = {"top": top, "bottom": bottom, "left": left, "right": right, "padded": True}
-    
+        pad_meta = {
+            "top": top,
+            "bottom": bottom,
+            "left": left,
+            "right": right,
+            "padded": True,
+        }
+
     norm_stats = {
-        "mean_fixed": mean_fixed, "std_fixed": std_fixed,
-        "mean_moving": mean_moving, "std_moving": std_moving
+        "mean_fixed": mean_fixed,
+        "std_fixed": std_fixed,
+        "mean_moving": mean_moving,
+        "std_moving": std_moving,
     }
 
     spatial_meta = {"spacing": spacing, "origin": origin, "direction": direction}
 
-    return (img_fixed_np, img_moving_np, dvf_np, seg_fixed_np, seg_moving_np, h, w, pad_meta,
-            anatomy_mask_raw, norm_stats, spatial_meta)
+    return (
+        img_fixed_np,
+        img_moving_np,
+        dvf_np,
+        seg_fixed_np,
+        seg_moving_np,
+        h,
+        w,
+        pad_meta,
+        anatomy_mask_raw,
+        norm_stats,
+        spatial_meta,
+    )
 
 
 def extract_patches(image, patch_size=TARGET_SIZE):
@@ -192,9 +252,9 @@ def extract_patches(image, patch_size=TARGET_SIZE):
     for y in starts_y:
         for x in starts_x:
             if len(image.shape) == 3:
-                patch = image[y:y + ph, x:x + pw, :]
+                patch = image[y : y + ph, x : x + pw, :]
             else:
-                patch = image[y:y + ph, x:x + pw]
+                patch = image[y : y + ph, x : x + pw]
             patches.append(patch)
             coordinates.append((y, x))
 

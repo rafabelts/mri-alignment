@@ -47,7 +47,7 @@ def main(model_name):
     device = get_device()
     print(f"Using: {device}")
 
-    runner = NestedCVRunner(model_name, device)
+    runner = NestedCVRunner(model_name, [device])
     runner.preprocess_all()
     folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
 
@@ -80,7 +80,9 @@ def main(model_name):
                 f"\n{'=' * 60}\n outer{i} seed{seed_idx} ({ckpt_path.name})\n{'=' * 60}"
             )
 
-            model = build_model(model_name, device)
+            model = build_model(
+                model_name, device, int_steps=old_result["theta"]["vxm_int_steps"]
+            )
             model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
             model.eval()
 
@@ -91,7 +93,7 @@ def main(model_name):
                 test_results, ram_fixed_te, ram_moving_te, meta_lookup_te
             )
             epe_list, jac_list, ssim_list = eval_metrics.evaluate_reconstructed(ram_meta_te)
-            dice_list, tre_list, hd_list = eval_metrics.evaluate_segmentation(
+            dice_list, tre_list, hd95_list = eval_metrics.evaluate_segmentation(
                 ram_meta_te
             )
 
@@ -101,10 +103,9 @@ def main(model_name):
                 "ssim": float(np.nanmean(ssim_list)),
                 "dice": float(np.nanmean(dice_list)),
                 "tre": float(np.nanmean(tre_list)),
-                "hausdorff": float(np.nanmean(hd_list)),
+                "hd95": float(np.nanmean(hd95_list)),
             }
             old_result["metrics"] = metrics
-            save_json(result_path, old_result)
 
             # boxplot for this checkpoint's outer-test cases
             plot_metrics = {
@@ -113,7 +114,7 @@ def main(model_name):
                 "SSIM": ssim_list,
                 "Dice": dice_list,
                 "TRE": tre_list,
-                "Hausdorff": hd_list,
+                "HD95": hd95_list,
             }
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
             for ax, (name, values) in zip(axes.flat, plot_metrics.items()):
@@ -141,7 +142,7 @@ def main(model_name):
                         "ssim": rec.get("ssim"),
                         "dice": seg.get("dice"),
                         "tre": seg.get("tre"),
-                        "hausdorff": seg.get("hausdorff"),
+                        "hd95": seg.get("hd95"),
                         "tumor_area_px": seg.get("tumor_area_px"),
                         "bounding_box_diag_mm": seg.get("bbox_diag_mm"),
                     }
@@ -156,12 +157,22 @@ def main(model_name):
             sample_fixed = sample_fixed[:1].to(device).float()
             sample_moving = sample_moving[:1].to(device).float()
             bench = benchmark_model(model, sample_fixed, sample_moving, device=device)
+            old_result["benchmark"] = bench
+            save_json(result_path, old_result)
 
             summary_rows.append(
                 {
-                    "outer": i,
+                    "model": model_name,
+                    "outer_fold": i,
                     "seed_idx": seed_idx,
-                    **metrics,
+                    "seed": old_result["seed"],
+                    "tre_mm": metrics["tre"],
+                    "dvf_epe_mm": metrics["epe"],
+                    "dice": metrics["dice"],
+                    "hd95_mm": metrics["hd95"],
+                    "negative_jacobian_pct": metrics["jacobian"],
+                    "ssim": metrics["ssim"],
+                    "inference_time_ms": bench["inference_time_ms_mean"],
                     "n_params": bench["n_params"],
                     "fps": bench["fps"],
                     "peak_memory_mb": bench["peak_memory_mb"],
@@ -169,7 +180,7 @@ def main(model_name):
             )
             print(f"outer{i} seed{seed_idx} -> {metrics}")
 
-    summary_path = reeval_dir / "summary.csv"
+    summary_path = reeval_dir / "detailed_runs.csv"
     pd.DataFrame(summary_rows).to_csv(summary_path, index=False, float_format="%.3f")
     print(f"\nSummary saved to: {summary_path}")
 
@@ -180,7 +191,10 @@ def main(model_name):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", type=str, choices=["voxelmorph", "transmorph"], required=True
+        "--model",
+        type=str,
+        choices=["voxelmorph", "cnn_transformer_svf_2d"],
+        required=True,
     )
     args = parser.parse_args()
     main(args.model)

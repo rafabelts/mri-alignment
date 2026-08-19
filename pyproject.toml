@@ -1,7 +1,7 @@
 [project]
 name = "mri-alignment"
 version = "0.1.0"
-description = "Deformable alignment of 2D MR images using deep learning (VoxelMorph / TransMorph)"
+description = "Deformable alignment of 2D MR images using VoxelMorph and a lightweight CNN-Transformer SVF model"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.5.1",
