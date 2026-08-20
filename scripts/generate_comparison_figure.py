@@ -1,8 +1,12 @@
 """
 Generates a qualitative side-by-side comparison figure (VoxelMorph vs. CNNTransformerSVF2D
-vs. classical B-Spline registration vs. ground truth) for one or more test cases,
+vs. classical B-Spline registration vs. ground truth) for one or more outer-test cases,
 and exports the underlying fixed/warped/DVF/propagated-segmentation volumes as
 .mha files.
+
+Each deep-learning prediction is out-of-fold: the script automatically finds
+the outer fold where the requested patient was held out and loads that fold's
+final-refit checkpoint.  The same seed index is used for both architectures.
 
 Usage:
     uv run python scripts/generate_comparison_figure.py --cases A_024:095 B_021:017
@@ -24,7 +28,7 @@ from torch.utils.data import DataLoader
 
 import config
 from src.classical_registration import ClassicalBRegistration
-from src.dataset import MRICineDataset, build_lookup
+from src.dataset import MRICineDataset, build_lookup, cv_splits
 from src.evaluate import inference_with_reconstruction
 from src.io_utils import denormalize, save_as_mha
 from src.models import build_model
@@ -32,6 +36,8 @@ from src.preprocessing import preprocess_dataset
 from src.utils import get_device
 
 DEFAULT_CASES = ["A_024:095", "B_021:017", "C_008:007"]
+OUTER_K = 5
+INNER_K = 3
 
 
 def warp_image(img_fixed_np, pred_dvf):
@@ -102,16 +108,59 @@ def get_single_case(seq_id, frame_idx):
     }
 
 
-def run_dl_model(model_name, checkpoint_name, loader, device):
-    """Loads `checkpoint_name` for `model_name` and runs inference on `loader` (a single case).
+def outer_test_fold(patient):
+    """Return the unique outer fold in which ``patient`` is held out."""
+    folds = cv_splits(config.DATA_DIR, OUTER_K, INNER_K)
+    matches = [i for i, fold in enumerate(folds) if patient in fold["outer_test"]]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Patient {patient!r} must occur in exactly one outer-test fold; "
+            f"found {matches}"
+        )
+    return matches[0]
+
+
+def fold_checkpoint(model_name, outer_fold, seed_idx):
+    """Resolve a final-refit checkpoint and its fold-specific integration steps."""
+    artifact = "proposed" if model_name == "cnn_transformer_svf_2d" else model_name
+    result_path = (
+        config.OUTPUTS_DIR
+        / "nested_cv"
+        / artifact
+        / "final"
+        / f"outer{outer_fold}_seed{seed_idx}.json"
+    )
+    checkpoint_path = (
+        config.CHECKPOINT_DIR
+        / "nested_cv"
+        / artifact
+        / "final"
+        / f"outer{outer_fold}_seed{seed_idx}.pt"
+    )
+    if not result_path.exists() or not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Missing out-of-fold artifacts for {artifact}, outer fold "
+            f"{outer_fold}, seed {seed_idx}. Expected {result_path} and "
+            f"{checkpoint_path}. Run nested_cv.py first."
+        )
+
+    import json
+
+    with result_path.open(encoding="utf-8") as file:
+        result = json.load(file)
+    return checkpoint_path, result["theta"]["int_steps"]
+
+
+def run_dl_model(model_name, outer_fold, seed_idx, loader, device):
+    """Load one final-refit checkpoint and run inference on a single case.
 
     Returns
     -------
     pred_dvf : np.ndarray (H, W, 2)
     anatomy_mask : np.ndarray (H, W) bool
     """
-    checkpoint_path = config.CHECKPOINT_DIR / checkpoint_name
-    model = build_model(model_name, device)
+    checkpoint_path, int_steps = fold_checkpoint(model_name, outer_fold, seed_idx)
+    model = build_model(model_name, device, int_steps=int_steps)
     model.load_state_dict(
         torch.load(checkpoint_path, map_location=device, weights_only=True)
     )
@@ -123,7 +172,7 @@ def run_dl_model(model_name, checkpoint_name, loader, device):
 
 
 def generate_figure_for_case(
-    patient, frame, vxm_checkpoint, proposal_checkpoint, device
+    patient, frame, seed_idx, device
 ):
     """
     Runs VoxelMorph, CNNTransformerSVF2D, and classical B-Spline registration on a single
@@ -134,6 +183,8 @@ def generate_figure_for_case(
     `outputs/comparison_exports/<patient>_<frame>/`.
     """
     print(f"{'=' * 60} Case: {patient} frame {frame}\n{'=' * 60}")
+    outer_fold = outer_test_fold(patient)
+    print(f"Out-of-fold inference: outer fold {outer_fold}, seed index {seed_idx}")
 
     case = get_single_case(patient, frame)
     fixed_np, moving_np, gt_dvf = case["fixed_np"], case["moving_np"], case["gt_dvf"]
@@ -155,12 +206,12 @@ def generate_figure_for_case(
 
     print("Running VoxelMorph")
     pred_dvf_vxm, mask_vxm = run_dl_model(
-        "voxelmorph", vxm_checkpoint, case["loader"], device
+        "voxelmorph", outer_fold, seed_idx, case["loader"], device
     )
 
     print("Running CNNTransformerSVF2D")
     pred_dvf_proposal, mask_proposal = run_dl_model(
-        "cnn_transformer_svf_2d", proposal_checkpoint, case["loader"], device
+        "cnn_transformer_svf_2d", outer_fold, seed_idx, case["loader"], device
     )
 
     print("Running classical B-Spline registration")
@@ -223,7 +274,7 @@ def generate_figure_for_case(
     print(f"Exports .mha saved in {export_dir}")
 
 
-def main(cases, vxm_checkpoint, proposal_checkpoint):
+def main(cases, seed_idx):
     """Generates a comparison figure for each "patient:frame" string in `cases`."""
     device = get_device()
     print(f"Using device: {device}")
@@ -231,7 +282,7 @@ def main(cases, vxm_checkpoint, proposal_checkpoint):
     for case_str in cases:
         patient, frame = case_str.split(":")
         generate_figure_for_case(
-            patient, frame, vxm_checkpoint, proposal_checkpoint, device
+            patient, frame, seed_idx, device
         )
 
 
@@ -245,15 +296,12 @@ if __name__ == "__main__":
         help="Format patient:frame, e.g.: A_024:095 B_021:017 C_008:007",
     )
     parser.add_argument(
-        "--vxm-checkpoint",
-        type=str,
-        default="nested_cv/voxelmorph/best_model/best_model.pt",
-    )
-    parser.add_argument(
-        "--proposal-checkpoint",
-        type=str,
-        default="nested_cv/cnn_transformer_svf_2d/best_model/best_model.pt",
+        "--seed-index",
+        type=int,
+        choices=range(3),
+        default=0,
+        help="Final-refit seed index to use for both architectures (default: 0)",
     )
     args = parser.parse_args()
 
-    main(args.cases, args.vxm_checkpoint, args.proposal_checkpoint)
+    main(args.cases, args.seed_index)

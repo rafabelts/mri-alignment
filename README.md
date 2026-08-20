@@ -128,13 +128,13 @@ uv sync
 ## Usage
 
 ```bash
-# Run the full nested CV + hyperparameter search + best-model selection for one architecture
+# Run the full nested CV + hyperparameter search for one architecture
 uv run python scripts/nested_cv.py --model voxelmorph
 uv run python scripts/nested_cv.py --model cnn_transformer_svf_2d
 
 # Same, but split the search stage's Optuna trials across multiple GPUs
-# (one trial per device at a time; final refit and best-model stages stay
-# single-threaded on the first device regardless of how many are listed)
+# (one trial per device at a time; final refits stay single-threaded on the
+# first device regardless of how many are listed)
 uv run python scripts/nested_cv.py --model voxelmorph --devices cuda:0,cuda:1
 
 # Re-aggregate + re-plot an in-progress or finished run without training anything
@@ -149,8 +149,12 @@ uv run python scripts/evaluate_classical_registration.py
 # Build one combined results table + comparison plot + significance test across all three methods
 uv run python scripts/build_results_table.py
 
-# Generate a qualitative VoxelMorph vs CNNTransformerSVF2D vs Classical figure for specific cases
+# Generate an out-of-fold qualitative comparison for specific cases.
+# The script finds each patient's outer-test fold and uses seed index 0 by default.
 uv run python scripts/generate_comparison_figure.py --cases A_024:095 B_021:017
+
+# Optionally use another predeclared final-refit seed consistently for both models
+uv run python scripts/generate_comparison_figure.py --seed-index 1 --cases A_024:095
 ```
 
 ## Configuration

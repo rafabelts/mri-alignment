@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import logging
-import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -206,30 +205,6 @@ def configure_logging(model_name, device):
     return log_path
 
 
-def _mode_with_tiebreak(values, default):
-    counts = Counter(values)
-    max_count = max(counts.values())
-    tied = [v for v, c in counts.items() if c == max_count]
-    return tied[0] if len(tied) == 1 else min(tied, key=lambda v: abs(v - default))
-
-
-def aggregate_theta(thetas, model_name):
-    """
-    Combines the 5 outer folds' winning configs into one. Continuous
-    parameters use the median (mode is meaningless for arbitrary floats -
-    5 folds almost never agree exactly); genuinely discrete/small-set
-    parameters use mode.
-    """
-    theta_final = {
-        "learning_rate": float(np.median([t["learning_rate"] for t in thetas])),
-        "lambda_smooth": float(np.median([t["lambda_smooth"] for t in thetas])),
-        "int_steps": _mode_with_tiebreak(
-            [t["int_steps"] for t in thetas], default=config.VXM_INT_STEPS
-        ),
-    }
-    return theta_final
-
-
 class NestedCVRunner:
     def __init__(self, model_name, devices):
         """`devices` contains exactly one device assigned to this process."""
@@ -243,9 +218,9 @@ class NestedCVRunner:
         self.results_dir = config.OUTPUTS_DIR / "nested_cv" / self.artifact_name
         self.ram = None
 
-        for sub in ["search", "theta", "final", "best_model", "plots"]:
+        for sub in ["search", "theta", "final", "plots"]:
             (self.results_dir / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ["search", "final", "best_model"]:
+        for sub in ["search", "final"]:
             (config.CHECKPOINT_DIR / "nested_cv" / self.artifact_name / sub).mkdir(
                 parents=True, exist_ok=True
             )
@@ -469,106 +444,6 @@ class NestedCVRunner:
                 outer_i, seed_idx, seed, theta, fold["outer_train"], fold["outer_test"]
             )
 
-    # --- best model (all data, no outer-test involved) ---
-
-    def run_best_model(self, folds):
-        assert self.ram is not None, (
-            "call preprocess_all() before running the best-model stage"
-        )
-        result_path = self.results_dir / "best_model" / "summary.json"
-        if result_path.exists():
-            saved = load_json(result_path)
-            if "internal_val_tre" not in saved.get("chosen", {}):
-                raise RuntimeError(
-                    f"{result_path} uses Dice-based seed selection. Archive/remove "
-                    "the legacy best_model JSON files and rerun this stage."
-                )
-            return saved
-
-        thetas = [
-            load_json(self.results_dir / "theta" / f"outer{i}.json")["theta"]
-            for i in range(OUTER_K)
-        ]
-        theta_final = aggregate_theta(thetas, self.model_name)
-        print(
-            f"[best_model] theta_final (median/mode across {OUTER_K} outer folds): {theta_final}"
-        )
-
-        all_subdirs = folds[0]["outer_train"] + folds[0]["outer_test"]
-        full_train, full_val = internal_train_val_split(all_subdirs)
-
-        train_data = subset_by_patients(*self.ram, full_train)
-        val_data = subset_by_patients(*self.ram, full_val)
-        train_loader = make_loader(*train_data, shuffle=True)
-        val_loader = make_loader(*val_data, shuffle=False)
-
-        candidates = []
-        for seed_idx, seed in enumerate(seeds_for(N_SEEDS)):
-            cand_path = self.results_dir / "best_model" / f"seed{seed_idx}.json"
-            if cand_path.exists():
-                saved = load_json(cand_path)
-                if "internal_val_tre" not in saved:
-                    raise RuntimeError(
-                        f"{cand_path} uses Dice-based seed selection. Archive/remove "
-                        "the legacy candidate JSON files and rerun this stage."
-                    )
-                candidates.append(saved)
-                continue
-
-            set_seed(seed)
-            model = build_model(
-                self.model_name, self.device, int_steps=theta_final["int_steps"]
-            )
-            ckpt_name = f"nested_cv/{self.artifact_name}/best_model/seed{seed_idx}.pt"
-            history, ckpt_path = train_model(
-                model, train_loader, val_loader, self.device,
-                checkpoint_name=ckpt_name, n_epochs=FINAL_EPOCHS,
-                lr=theta_final["learning_rate"], lambda_smooth=theta_final["lambda_smooth"],
-                patience=FINAL_EPOCHS + 1,
-                log_prefix=f"[{self.tag}][{self.device}][best_model][seed={seed_idx}] ",
-            )
-            model.load_state_dict(
-                torch.load(ckpt_path, map_location=self.device, weights_only=True)
-            )
-            model.eval()
-            tre = evaluate_tre(
-                model, val_loader, val_data[0], val_data[1], val_data[3], self.device
-            )
-
-            cand = {
-                "seed_idx": seed_idx,
-                "seed": seed,
-                "internal_val_tre": tre,
-                "checkpoint": str(ckpt_path),
-            }
-            save_json(cand_path, cand)
-            save_json(
-                self.results_dir / "best_model" / f"seed{seed_idx}_history.json",
-                history,
-            )
-            candidates.append(cand)
-            print(
-                f"[best_model] seed{seed_idx}({seed}) -> internal val TRE={tre:.3f} mm"
-            )
-
-        best = min(candidates, key=lambda c: c["internal_val_tre"])
-        selected_path = (
-            config.CHECKPOINT_DIR
-            / "nested_cv"
-            / self.artifact_name
-            / "best_model"
-            / "best_model.pt"
-        )
-        shutil.copy2(best["checkpoint"], selected_path)
-        best["selected_checkpoint"] = str(selected_path)
-
-        result = {"theta_final": theta_final, "candidates": candidates, "chosen": best}
-        save_json(result_path, result)
-        print(
-            f"[best_model] chosen seed{best['seed_idx']} -> checkpoint: {selected_path}"
-        )
-        return result
-
     # --- reporting ---
 
     def aggregate_and_plot(self):
@@ -636,7 +511,6 @@ class NestedCVRunner:
         plots_dir = self.results_dir / "plots"
         self._violin_plot(dice, tre, hd95, plots_dir)
         self._convergence_plot(records, plots_dir)
-        self._best_model_plot(plots_dir)
 
     def _violin_plot(self, dice, tre, hd95, plots_dir):
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
@@ -691,44 +565,6 @@ class NestedCVRunner:
         plt.close(fig)
         print(f"Saved: {path}")
 
-    def _best_model_plot(self, plots_dir):
-        best_model_dir = self.results_dir / "best_model"
-        history_files = sorted(best_model_dir.glob("seed*_history.json"))
-        if not history_files:
-            return
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        colors = plt.cm.tab10.colors
-        for i, hf in enumerate(history_files):
-            history = load_json(hf)
-            seed_label = hf.stem.split("_")[0]
-            color = colors[i % len(colors)]
-            for ax, comp in zip(axes, ["loss", "epe", "smooth"]):
-                ax.plot(
-                    history[f"train_{comp}"],
-                    color=color,
-                    alpha=0.6,
-                    linestyle="--",
-                    linewidth=0.8,
-                    label=f"{seed_label} train" if comp == "loss" else None,
-                )
-                ax.plot(
-                    history[f"val_{comp}"],
-                    color=color,
-                    alpha=0.9,
-                    linewidth=1.2,
-                    label=f"{seed_label} val" if comp == "loss" else None,
-                )
-        for ax, comp in zip(axes, ["LOSS", "EPE", "SMOOTH"]):
-            ax.set_title(comp)
-            ax.set_xlabel("epoch")
-        axes[0].legend(fontsize=8)
-        plt.tight_layout()
-        path = plots_dir / f"best_model_convergence_{self.model_name}.png"
-        plt.savefig(path, dpi=150)
-        plt.close(fig)
-        print(f"Saved: {path}")
-
-
 def main(args):
     devices = args.devices.split(",") if args.devices else [get_device()]
     if len(devices) != 1:
@@ -760,7 +596,6 @@ def main(args):
         for i, fold in enumerate(folds):
             print(f"\n{'=' * 60}\n Outer fold {i + 1}/{OUTER_K}\n{'=' * 60}")
             runner.run_outer_fold(i, fold)
-        runner.run_best_model(folds)
 
     runner.aggregate_and_plot()
 
