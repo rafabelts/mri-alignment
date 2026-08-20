@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import os
 import logging
@@ -57,6 +58,8 @@ LOGGER = logging.getLogger("mri_alignment")
 OUTER_K = 5
 INNER_K = 3
 TRIAL_BUDGET = 15
+# Prevent a persistently broken configuration/environment from retrying forever.
+MAX_FAILED_TRIALS_PER_OUTER_FOLD = 5
 SEARCH_EPOCH_CAP = 10
 FINAL_EPOCHS = 50
 N_SEEDS = 3
@@ -107,6 +110,14 @@ def make_loader(ram_fixed, ram_moving, ram_dvf, ram_meta, shuffle, batch_size=co
     if config.NUM_WORKERS > 0:
         kwargs.update(persistent_workers=True, prefetch_factor=2)
     return DataLoader(dataset, **kwargs)
+
+
+def release_memory(*objects):
+    """Drop caller-owned references before calling this, then release caches."""
+    del objects
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def internal_train_val_split(
@@ -246,53 +257,57 @@ class NestedCVRunner:
         theta = suggest_theta(trial, self.model_name)
 
         device = self.device
+        tre_scores = []
         try:
-            tre_scores = []
             for j, (inner_train, inner_val) in enumerate(fold["inner_folds"]):
-                train_data = subset_by_patients(*self.ram, inner_train)
-                val_data = subset_by_patients(*self.ram, inner_val)
-                train_loader = make_loader(*train_data, shuffle=True)
-                val_loader = make_loader(*val_data, shuffle=False)
+                train_data = val_data = None
+                train_loader = val_loader = model = None
+                ckpt_path = None
+                try:
+                    train_data = subset_by_patients(*self.ram, inner_train)
+                    val_data = subset_by_patients(*self.ram, inner_val)
+                    train_loader = make_loader(*train_data, shuffle=True)
+                    val_loader = make_loader(*val_data, shuffle=False)
 
-                # set_seed() reseeds torch's global RNG, which is shared across
-                # threads - under concurrent search trials this means model init
-                # isn't perfectly reproducible relative to other in-flight trials.
-                # Acceptable here: search-stage only needs relative ranking
-                # between configs, not bit-exact reproducibility (unlike the
-                # final-refit/best-model seeds, which stay single-threaded).
-                set_seed(SEARCH_SEED)
-                model = build_model(self.model_name, device, int_steps=theta["int_steps"])
+                    # Search trials are intentionally process-local and sequential.
+                    set_seed(SEARCH_SEED)
+                    model = build_model(self.model_name, device, int_steps=theta["int_steps"])
 
-                def prune_callback(epoch, val_metrics, inner_j=j):
-                    if inner_j == 0:
-                        trial.report(val_metrics["loss"], step=epoch)
-                        if trial.should_prune():
-                            raise optuna.TrialPruned()
+                    def prune_callback(epoch, val_metrics, inner_j=j):
+                        if inner_j == 0:
+                            trial.report(val_metrics["loss"], step=epoch)
+                            if trial.should_prune():
+                                raise optuna.TrialPruned()
 
-                ckpt_name = (
-                    f"nested_cv/{self.artifact_name}/search/"
-                    f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
-                )
-                _, ckpt_path = train_model(
-                    model, train_loader, val_loader, device,
-                    checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
-                    lr=theta["learning_rate"], lambda_smooth=theta["lambda_smooth"],
-                    epoch_callback=prune_callback,
-                    log_prefix=(f"[{self.tag}][{device}][search][outer={outer_i}]"
-                                f"[trial={trial.number}][inner={j}] "),
-                )
-                model.load_state_dict(
-                    torch.load(ckpt_path, map_location=device, weights_only=True)
-                )
-                model.eval()
+                    ckpt_name = (
+                        f"nested_cv/{self.artifact_name}/search/"
+                        f"tmp_outer{outer_i}_trial{trial.number}_inner{j}.pt"
+                    )
+                    ckpt_path = config.CHECKPOINT_DIR / ckpt_name
+                    _, ckpt_path = train_model(
+                        model, train_loader, val_loader, device,
+                        checkpoint_name=ckpt_name, n_epochs=SEARCH_EPOCH_CAP,
+                        lr=theta["learning_rate"], lambda_smooth=theta["lambda_smooth"],
+                        epoch_callback=prune_callback,
+                        log_prefix=(f"[{self.tag}][{device}][search][outer={outer_i}]"
+                                    f"[trial={trial.number}][inner={j}] "),
+                    )
+                    model.load_state_dict(
+                        torch.load(ckpt_path, map_location=device, weights_only=True)
+                    )
+                    model.eval()
 
-                tre = evaluate_tre(
-                    model, val_loader, val_data[0], val_data[1], val_data[3], device
-                )
-                ckpt_path.unlink(missing_ok=True)  # only the score matters for search-stage runs
-                tre_scores.append(tre)
+                    tre = evaluate_tre(
+                        model, val_loader, val_data[0], val_data[1], val_data[3], device
+                    )
+                    tre_scores.append(tre)
+                finally:
+                    if ckpt_path is not None:
+                        ckpt_path.unlink(missing_ok=True)
+                    del model, train_loader, val_loader, train_data, val_data
+                    release_memory()
         finally:
-            torch.cuda.empty_cache()
+            release_memory()
 
         mean_tre = float(np.mean(tre_scores))
         logging.getLogger("mri_alignment").info(
@@ -327,8 +342,21 @@ class NestedCVRunner:
             sampler=optuna.samplers.TPESampler(seed=SEARCH_SEED),
             pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
         )
-        remaining = TRIAL_BUDGET - len(study.trials)
+        usable_states = {
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.PRUNED,
+        }
+        usable_trials = sum(t.state in usable_states for t in study.trials)
+        failed_trials = sum(
+            t.state == optuna.trial.TrialState.FAIL for t in study.trials
+        )
+        remaining = TRIAL_BUDGET - usable_trials
         if remaining > 0:
+            if failed_trials >= MAX_FAILED_TRIALS_PER_OUTER_FOLD:
+                raise RuntimeError(
+                    f"Outer fold {outer_i} already has {failed_trials} failed trials; "
+                    "refusing to retry indefinitely. Check available RAM and the logs."
+                )
             study.optimize(
                 lambda trial: self._search_objective(trial, outer_i, fold),
                 n_trials=remaining, n_jobs=1,

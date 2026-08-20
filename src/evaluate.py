@@ -61,11 +61,17 @@ def inference_with_reconstruction(model, loader, device="cuda"):
 
         results = {}
         for key, data in acc.items():
-            count_safe = np.maximum(data["count"], 1e-6)
+            # Normalize the accumulators in place. Keeping both the sums and
+            # normalized copies alive roughly doubled peak host RAM here.
+            count_safe = data["count"]
+            np.maximum(count_safe, 1e-6, out=count_safe)
+            np.divide(data["pred_sum"], count_safe[..., None], out=data["pred_sum"])
+            np.divide(data["gt_sum"], count_safe[..., None], out=data["gt_sum"])
+            np.divide(data["mask_sum"], count_safe, out=data["mask_sum"])
             results[key] = {
-                "pred_dvf": data["pred_sum"] / count_safe[..., None],
-                "gt_dvf": data["gt_sum"] / count_safe[..., None],
-                "anatomy_mask": (data["mask_sum"] / count_safe) > 0.5,
+                "pred_dvf": data["pred_sum"],
+                "gt_dvf": data["gt_sum"],
+                "anatomy_mask": data["mask_sum"] > 0.5,
             }
         return results
 
