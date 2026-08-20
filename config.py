@@ -9,7 +9,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_DIR = Path(os.environ.get("MRI_DATA_DIR", PROJECT_ROOT / "data" / "TrackRad"))
-CHECKPOINT_DIR = Path(os.environ.get("MRI_CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints"))
+CHECKPOINT_DIR = Path(
+    os.environ.get("MRI_CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints")
+)
 OUTPUTS_DIR = Path(os.environ.get("MRI_OUTPUTS_DIR", PROJECT_ROOT / "outputs"))
 
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -20,8 +22,8 @@ TARGET_SIZE = (256, 256)
 EPSILON_BG = 1.0  # almost cero threshold to separate real background from anatomy
 
 # --- Patients split ---
-TEST_SIZE = 0.3        # train vs (val+test)
-VAL_TEST_SPLIT = 0.5   # val vs. test within the remaining 30%
+TEST_SIZE = 0.3  # train vs (val+test)
+VAL_TEST_SPLIT = 0.5  # val vs. test within the remaining 30%
 RANDOM_STATE = 42
 
 # --- VoxelMorph architecture ---
@@ -33,7 +35,7 @@ VXM_TRG_FEATS = 1
 
 # --- Training ---
 BATCH_SIZE = 8
-NUM_WORKERS = 1
+NUM_WORKERS = 0
 USE_AMP = False  # GTX 1070 (Pascal): optional AMP support must remain opt-in.
 LEARNING_RATE = 1e-4
 N_EPOCHS = 100

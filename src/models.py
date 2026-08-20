@@ -3,6 +3,8 @@
 import src.compat
 import voxelmorph as vxm
 
+src.compat.patch_voxelmorph_spatial_transformer()
+
 from config import VXM_INSHAPE, VXM_INT_STEPS, VXM_INT_DOWNSIZE, VXM_SRC_FEATS, VXM_TRG_FEATS
 
 def build_model(model_name, device, inshape=None, int_steps=None):

@@ -27,3 +27,52 @@ if not hasattr(inspect, "getargspec"):
         return _ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
 
     inspect.getargspec = _getargspec
+
+
+def patch_voxelmorph_spatial_transformer():
+    """Use an explicit meshgrid indexing mode with the legacy VoxelMorph layer.
+
+    VoxelMorph 0.2 calls ``torch.meshgrid`` without ``indexing``.  PyTorch's
+    current default is ``"ij"``, so specifying it preserves VoxelMorph's grid
+    layout while avoiding the deprecation warning (and a future behaviour
+    change when PyTorch makes the argument mandatory).
+    """
+    import torch
+    import torch.nn.functional as nnf
+    from torch import nn
+    from voxelmorph.torch import layers
+
+    if getattr(layers.SpatialTransformer, "_mri_alignment_compatible", False):
+        return
+
+    class SpatialTransformer(nn.Module):
+        _mri_alignment_compatible = True
+
+        def __init__(self, size, mode="bilinear"):
+            super().__init__()
+            self.mode = mode
+
+            vectors = [torch.arange(0, dimension) for dimension in size]
+            grid = torch.stack(torch.meshgrid(*vectors, indexing="ij"))
+            grid = torch.unsqueeze(grid, 0).type(torch.FloatTensor)
+            self.register_buffer("grid", grid)
+
+        def forward(self, src, flow):
+            new_locs = self.grid + flow
+            shape = flow.shape[2:]
+
+            for axis in range(len(shape)):
+                new_locs[:, axis, ...] = 2 * (
+                    new_locs[:, axis, ...] / (shape[axis] - 1) - 0.5
+                )
+
+            if len(shape) == 2:
+                new_locs = new_locs.permute(0, 2, 3, 1)[..., [1, 0]]
+            elif len(shape) == 3:
+                new_locs = new_locs.permute(0, 2, 3, 4, 1)[..., [2, 1, 0]]
+
+            return nnf.grid_sample(
+                src, new_locs, align_corners=True, mode=self.mode
+            )
+
+    layers.SpatialTransformer = SpatialTransformer
