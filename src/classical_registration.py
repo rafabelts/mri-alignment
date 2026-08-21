@@ -132,13 +132,17 @@ class ClassicalBRegistration:
         comparable to the deep-learning models' predicted DVFs (both are then
         used the same way by EvaluationMetric/map_coordinates).
 
-        SimpleITK's Execute(fixed, moving) returns a transform T used to pull
-        moving into fixed's frame (moving(x + D(x)) ~ fixed(x)), the opposite
-        direction from this codebase's pred_dvf convention
-        (fixed(x + pred_dvf(x)) ~ moving(x), matching gt_dvf/the DL models) -
-        negated below to match. Verified empirically: warping fixed with the
-        negated field reduces MSE against moving below the no-registration
-        baseline; the un-negated field made it worse than no registration.
+        The argument names follow the rest of this project: ``fixed_np`` is
+        the frame-0 reference I_0 and ``moving_np`` is the current frame I_t.
+        SimpleITK registration transforms map points on the first (metric
+        fixed/output) image to sampling points on the second (metric moving)
+        image. Therefore the call deliberately reverses those roles:
+
+            Execute(current=I_t, reference=I_0)
+
+        This directly estimates T(x) = x + u(x) such that I_0(T(x)) ~= I_t(x),
+        matching the GT-DVF and deep-learning convention without negating or
+        approximately inverting a non-rigid displacement field.
 
         Returns
         -------
@@ -151,13 +155,15 @@ class ClassicalBRegistration:
             img.SetOrigin((0.0, 0.0))
             img.SetDirection((1.0, 0.0, 0.0, 1.0))
 
-        out_tx = self.register(fixed_2d, moving_2d)
+        reference_2d = fixed_2d
+        current_2d = moving_2d
+        out_tx = self.register(current_2d, reference_2d)
 
         dvf_filter = sitk.TransformToDisplacementFieldFilter()
-        dvf_filter.SetReferenceImage(fixed_2d)
+        dvf_filter.SetReferenceImage(current_2d)
         dvf_2d = dvf_filter.Execute(out_tx)
 
-        return -sitk.GetArrayFromImage(dvf_2d)
+        return sitk.GetArrayFromImage(dvf_2d)
 
     def run(self, fixed_path, moving_path, output_tx_path=None, output_dvf_path=None):
         """High-level pipeline: loads images, registers 2D slices, and outputs the DVF"""
@@ -168,15 +174,18 @@ class ClassicalBRegistration:
         fixed_2d = self.extract_2d(fixed_3d)
         moving_2d = self.extract_2d(moving_3d)
 
-        out_tx = self.register(fixed_2d, moving_2d)
+        # SimpleITK's first image defines the output domain. Register current
+        # against reference so the resulting pull transform samples I_0 to
+        # reconstruct I_t, consistently with register_arrays() and the GT-DVF.
+        out_tx = self.register(moving_2d, fixed_2d)
 
         # 1. Compute 2D Displacement Field from B-spline transform
         dvf_filter = sitk.TransformToDisplacementFieldFilter()
-        dvf_filter.SetReferenceImage(fixed_2d)
+        dvf_filter.SetReferenceImage(moving_2d)
         dvf_2d = dvf_filter.Execute(out_tx)
 
         # 2. Convert 2D DVF to 3D Vector Image (dx, dy, 0.0)
-        dvf_3d = self.convert_2d_dvf_to_3d_like(dvf_2d, fixed_3d)
+        dvf_3d = self.convert_2d_dvf_to_3d_like(dvf_2d, moving_3d)
 
         # 3. Save outputs
         if output_tx_path:

@@ -18,8 +18,9 @@ It reuses three building blocks from `voxelmorph` (Balakrishnan et al., 2019):
 `VecInt` (scaling-and-squaring integration, in the sense of Ashburner 2007 /
 Dalca et al. 2018) and `SpatialTransformer` (warping), instead of writing
 them from scratch, so that this model resamples images and integrates flow
-fields with the exact same numerics and pixel-coordinate convention as the
-other (VoxelMorph) model in this project.
+fields with the same numerical operators as the VoxelMorph model. The public
+DVF convention is ``(dx, dy)``; an explicit component swap adapts it to
+VoxelMorph's internal spatial-tensor order ``(dy, dx)``.
 
 Exposes the same interface used elsewhere for the other model:
     model(source, target, registration=True) -> (moved, pos_flow)
@@ -81,6 +82,12 @@ class TransformerBottleneck(nn.Module):
 
     def forward(self, x):
         b, c, h, w = x.shape
+        if h * w != self.pos_embed.shape[1]:
+            raise ValueError(
+                "Bottleneck token count does not match the learned positional "
+                f"embedding: got {h * w}, expected {self.pos_embed.shape[1]}. "
+                "Use the image size for which this model was constructed."
+            )
         tokens = x.flatten(2).transpose(1, 2) + self.pos_embed
         for block in self.blocks:
             tokens = block(tokens)
@@ -101,6 +108,8 @@ class CNNTransformerSVF2D(nn.Module):
     ):
         super().__init__()
         ndims = len(inshape)
+        if ndims != 2:
+            raise ValueError("CNNTransformerSVF2D supports 2D inputs only")
 
         # -- Encoder --
         self.down1 = ConvBlock(2, 16, stride=2)  # 256 -> 128
@@ -123,15 +132,9 @@ class CNNTransformerSVF2D(nn.Module):
         nn.init.normal_(self.velocity_head.weight, mean=0.0, std=1e-5)
         nn.init.constant_(self.velocity_head.bias, 0.0)
 
-        # -- Convert the predicted SVF into a displacement field --
-        # (all three layers reused from voxelmorph, Balakrishnan et al. 2019)
-        # `resize`/`fullsize` down/upsample the field around the integration step
-        # (cheaper and more regular at lower resolution); `integrate` runs
-        # scaling-and-squaring (Ashburner 2007 / Dalca et al. 2018) to turn the
-        # stationary velocity field into a discrete approximation of its
-        # diffeomorphic flow. Numerical discretization can still introduce local
-        # foldings, which are assessed with the Jacobian metric. `transformer`
-        # resamples `source` with the resulting DVF via bilinear grid sampling.
+        # Integrating at lower resolution reduces cost and regularizes the field.
+        # VoxelMorph's geometric operators use tensor-axis order (dy, dx), while
+        # this project's public and stored field convention is (dx, dy).
         self.int_downsize = int_downsize
         down_shape = [int(d / int_downsize) for d in inshape]
         self.resize = (
@@ -151,7 +154,7 @@ class CNNTransformerSVF2D(nn.Module):
 
     def forward(self, source, target, registration=False):
         """
-        Predicts the DVF that warps `source` onto `target` and applies it.
+        Predict and apply a pull displacement that reconstructs ``target``.
 
         Parameters
         ----------
@@ -161,8 +164,8 @@ class CNNTransformerSVF2D(nn.Module):
             If False, returns the deterministic pre-integration velocity
             (`preint_flow`) at the integration resolution
             (`inshape / int_downsize`). If True (training/eval), returns the
-            final integrated flow (`pos_flow`) at full resolution, i.e.
-            the actual displacement field used to produce `y_source`.
+            final integrated DVF at full resolution. Returned SVFs and DVFs
+            use public channel order ``(dx, dy)``.
 
         Returns
         -------
@@ -203,13 +206,14 @@ class CNNTransformerSVF2D(nn.Module):
         velocity = self.velocity_head(u4)
         preint_flow = self.resize(velocity) if self.resize else velocity
 
-        pos_flow = preint_flow
+        spatial_flow = preint_flow[:, [1, 0], ...]
         if self.integrate:
-            pos_flow = self.integrate(pos_flow)
+            spatial_flow = self.integrate(spatial_flow)
             if self.fullsize:
-                pos_flow = self.fullsize(pos_flow)
+                spatial_flow = self.fullsize(spatial_flow)
+        pos_flow = spatial_flow[:, [1, 0], ...]
 
-        y_source = self.transformer(source, pos_flow)
+        y_source = self.transformer(source, spatial_flow)
 
         if not registration:
             return y_source, preint_flow

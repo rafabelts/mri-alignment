@@ -24,7 +24,6 @@ def build_model(model_name, device, inshape=None, int_steps=None):
         Overrides the default diffeomorphic integration step count (both
         architectures reuse VoxelMorph's VecInt) - e.g. for hyperparameter
         search over this value.
-
     Returns
     -------
     torch.nn.Module
@@ -34,7 +33,6 @@ def build_model(model_name, device, inshape=None, int_steps=None):
         kwargs["inshape"] = inshape
     if int_steps is not None:
         kwargs["int_steps"] = int_steps
-
     if model_name == 'voxelmorph':
         return _build_voxelmorph(device, **kwargs)
     elif model_name == 'cnn_transformer_svf_2d':
@@ -77,10 +75,12 @@ def _build_cnn_transformer_svf_2d(
 
 def load_weights_any_shape(model, state_dict_path, device):
     """
-    Load the trainned weights into a VxmDense instace with a different 
-    'inshape' than the one used during training. The only size-dependent parameters
-    are the SpatialTransformer's grid buffers (which are not trainable weights), so
-    they are excluded before loading.
+    Load weights while rebuilding non-trainable spatial grids for ``inshape``.
+
+    This supports VxmDense checkpoints at another spatial size. The proposed
+    CNN--Transformer has a learned absolute positional embedding whose token
+    count depends on image size, so its checkpoints require the original
+    bottleneck dimensions unless that embedding is explicitly adapted.
 
     Useful for running direct inference on full-size images of variable dimensions without
     going through patches.
@@ -89,6 +89,13 @@ def load_weights_any_shape(model, state_dict_path, device):
 
     state_dict = torch.load(state_dict_path, map_location=device, weights_only=True)
     filtered = {k: v for k, v in state_dict.items() if "grid" not in k}
+    model_state = model.state_dict()
+    for key, value in filtered.items():
+        if key.endswith("pos_embed") and key in model_state and value.shape != model_state[key].shape:
+            raise ValueError(
+                "Checkpoint positional embedding shape does not match this image size: "
+                f"checkpoint {tuple(value.shape)} vs model {tuple(model_state[key].shape)}."
+            )
     model.load_state_dict(filtered, strict=False)
     model.eval()
     return model

@@ -24,7 +24,7 @@ class Loss:
         self.eps = eps
 
     def charbonnier_epe_loss(self):
-        """Charbonnier: L2 for small mistakes, L1 big errors."""
+        """Mean robust vector norm ``sqrt(||pred-gt||_2^2 + eps^2)``."""
         diff_sq = ((self.pred_dvf - self.gt_dvf) ** 2).sum(dim=1)
         charbonnier = torch.sqrt(diff_sq + self.eps ** 2)
 
